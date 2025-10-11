@@ -867,8 +867,24 @@ class PortfolioBacktester:
 
         for i, (date, portfolio_value) in enumerate(monthly_data['portfolio_value'].items()):
             if i == 0:
-                # 第一个月的收益率为0
-                monthly_returns.append(0.0)
+                # 第一个月计算从投资日到月末的实际收益率
+                # 找到第一个月的第一天
+                first_month_start = date.replace(day=1)
+                # 获取第一个月内的数据
+                first_month_data = self.portfolio_value.loc[first_month_start:date, 'portfolio_value']
+
+                if not first_month_data.empty:
+                    # 使用第一个月第一个交易日的价值作为基准
+                    first_day_value = first_month_data.iloc[0]
+                    if first_day_value > 0:
+                        net_change = portfolio_value - first_day_value
+                        monthly_return = (net_change / first_day_value) * 100
+                    else:
+                        monthly_return = 0.0
+                else:
+                    monthly_return = 0.0
+
+                monthly_returns.append(monthly_return)
             else:
                 prev_date = monthly_data.index[i-1]
                 prev_portfolio_value = monthly_data['portfolio_value'].iloc[i-1]
