@@ -5,6 +5,12 @@ import akshare as ak
 from typing import List, Dict, Optional
 import os
 
+# 图表相关导入
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import plotly.offline as pyo
+
 # 设置pandas选项以避免未来警告
 pd.set_option('future.no_silent_downcasting', True)
 
@@ -210,7 +216,7 @@ def get_price_akshare(stock: str, start_date, end_date, need_ma=True,
         if use_cache and result is not None and not result.empty:
             _save_to_cache(result, cache_file_path)
 
-        print(f"成功获取 {stock} 数据，共 {len(result)} 条记录")
+        # print(f"成功获取 {stock} 数据，共 {len(result)} 条记录")
         return result
 
     except Exception as e:
@@ -233,6 +239,11 @@ class PortfolioBacktester:
     - 支持定期再平衡
     - 支持定投（DCA）
     - 计算各项性能指标
+
+    策略优化：
+    - 采用"先平衡后定投"执行顺序，减少逻辑冲突
+    - 避免定投买入后立即卖出的情况
+    - 降低交易成本，提升投资效率
     """
 
     def __init__(self,
@@ -248,7 +259,9 @@ class PortfolioBacktester:
                  enable_rebalancing: bool = False,
                  rebalance_freq: str = 'quarterly',
                  rebalance_threshold: float = 0.0,
-                 force_refresh: bool = False):
+                 risk_free_rate: float = 0.02,
+                 force_refresh: bool = False,
+                 verbose_trading: bool = False):
         """
         初始化回测器
 
@@ -265,7 +278,9 @@ class PortfolioBacktester:
             enable_rebalancing: 是否启用再平衡
             rebalance_freq: 再平衡频率 ('monthly', 'quarterly', 'yearly')
             rebalance_threshold: 再平衡触发阈值（权重偏离超过此值时触发）
+            risk_free_rate: 无风险利率，默认3% (0.03)
             force_refresh: 是否强制刷新缓存数据，默认False
+            verbose_trading: 是否显示详细的定投和再平衡交易信息，默认False
         """
         self.etf_codes = etf_codes
         self.weights = np.array(weights)
@@ -284,8 +299,14 @@ class PortfolioBacktester:
         self.rebalance_freq = rebalance_freq
         self.rebalance_threshold = rebalance_threshold
 
+        # 无风险利率参数
+        self.risk_free_rate = risk_free_rate
+
         # 数据刷新参数
         self.force_refresh = force_refresh
+
+        # 交易详细打印参数
+        self.verbose_trading = verbose_trading
 
         # 验证权重
         if abs(np.sum(weights) - 1.0) > 0.001:
@@ -301,6 +322,7 @@ class PortfolioBacktester:
         # 历史记录
         self.daily_values = []  # 每日组合价值
         self.daily_dates = []  # 对应日期
+        self.daily_positions = {}  # 每日ETF持仓详情 {date: {etf_code: shares, value, weight}}
         self.transactions = []  # 交易记录
         self.dca_dates = []  # 定投日期
         self.rebalance_dates = []  # 再平衡日期
@@ -310,13 +332,7 @@ class PortfolioBacktester:
 
     def fetch_data(self) -> Dict[str, pd.DataFrame]:
         """获取所有ETF的价格数据"""
-        if self.force_refresh:
-            print("开始获取ETF数据（强制刷新缓存）...")
-        else:
-            print("开始获取ETF数据...")
-
         for etf_code in self.etf_codes:
-            print(f"获取 {etf_code} 数据...")
             data = get_price_akshare(
                 stock=etf_code,
                 start_date=self.start_date,
@@ -332,7 +348,6 @@ class PortfolioBacktester:
                 continue
 
             self.etf_data[etf_code] = data
-            print(f"  {etf_code}: {len(data)} 条记录")
 
         if not self.etf_data:
             raise ValueError("未能获取任何ETF数据")
@@ -346,9 +361,11 @@ class PortfolioBacktester:
         Args:
             date: 建仓日期
         """
+        # 基本打印信息
         print(f"\n在 {date.strftime('%Y-%m-%d')} 初始建仓")
 
         total_value = self.cash
+        initial_transactions = {}
 
         for i, etf_code in enumerate(self.etf_codes):
             if etf_code not in self.etf_data:
@@ -361,13 +378,15 @@ class PortfolioBacktester:
                 if len(future_dates) > 0:
                     date = future_dates[0]
                 else:
-                    print(f"  {etf_code}: 在 {date} 后没有交易数据，跳过")
+                    if not self.verbose_trading:
+                        print(f"  {etf_code}: 在 {date} 后没有交易数据，跳过")
                     continue
 
             open_price = self.etf_data[etf_code].loc[date, 'open']
 
             if pd.isna(open_price):
-                print(f"  {etf_code}: 开盘价数据缺失，跳过")
+                if not self.verbose_trading:
+                    print(f"  {etf_code}: 开盘价数据缺失，跳过")
                 continue
 
             # 计算该ETF应分配的资金
@@ -389,7 +408,7 @@ class PortfolioBacktester:
                 self.cash -= cost
 
                 # 记录交易
-                self.transactions.append({
+                transaction = {
                     'date': date,
                     'type': 'initial_buy',
                     'etf_code': etf_code,
@@ -397,11 +416,29 @@ class PortfolioBacktester:
                     'price': open_price,
                     'amount': cost,
                     'cash_after': self.cash
-                })
+                }
+                self.transactions.append(transaction)
 
-                print(f"  买入 {etf_code}: {shares}股 @ ¥{open_price:.3f}, 成本: ¥{cost:,.2f}")
+                # 保存交易信息用于详细打印
+                initial_transactions[etf_code] = {
+                    'name': f'ETF {etf_code}',
+                    'target_amount': target_value,
+                    'shares': shares,
+                    'price': open_price,
+                    'actual_amount': cost
+                }
 
-        print(f"  建仓后现金: ¥{self.cash:,.2f}")
+                # 简单模式下只显示基本信息
+                if not self.verbose_trading:
+                    print(f"  买入 {etf_code}: {shares:.2f}股 @ ¥{open_price:.3f}, 成本: ¥{cost:,.2f}")
+
+        # 根据参数决定打印详细程度
+        if self.verbose_trading and initial_transactions:
+            # 详细模式：调用详细信息打印方法
+            self._print_initial_buy_details(initial_transactions)
+        else:
+            # 简单模式：只显示基本信息
+            print(f"  建仓后现金: ¥{self.cash:,.2f}")
 
     def _get_dca_dates(self, trading_dates: List[pd.Timestamp]) -> List[pd.Timestamp]:
         """
@@ -539,12 +576,14 @@ class PortfolioBacktester:
         Args:
             date: 定投日期
         """
+        # 基本打印信息
         print(f"\n定投 {date.strftime('%Y-%m-%d')}: 投入 ¥{self.dca_amount:,.2f}")
 
         # 添加定投资金
         self.cash += self.dca_amount
 
         total_dca_value = self.dca_amount
+        dca_transactions = []
 
         for i, etf_code in enumerate(self.etf_codes):
             if etf_code not in self.etf_data:
@@ -552,13 +591,15 @@ class PortfolioBacktester:
 
             # 获取当天的收盘价
             if date not in self.etf_data[etf_code].index:
-                print(f"  {etf_code}: 当天无交易数据，跳过")
+                if not self.verbose_trading:
+                    print(f"  {etf_code}: 当天无交易数据，跳过")
                 continue
 
             close_price = self.etf_data[etf_code].loc[date, 'close']
 
             if pd.isna(close_price):
-                print(f"  {etf_code}: 收盘价数据缺失，跳过")
+                if not self.verbose_trading:
+                    print(f"  {etf_code}: 收盘价数据缺失，跳过")
                 continue
 
             # 计算该ETF应分配的资金
@@ -596,7 +637,7 @@ class PortfolioBacktester:
                 self.cash -= cost
 
                 # 记录交易
-                self.transactions.append({
+                transaction = {
                     'date': date,
                     'type': 'dca_buy',
                     'etf_code': etf_code,
@@ -604,79 +645,200 @@ class PortfolioBacktester:
                     'price': close_price,
                     'amount': cost,
                     'cash_after': self.cash
-                })
+                }
+                self.transactions.append(transaction)
+                dca_transactions.append(transaction)
 
-                print(f"  买入 {etf_code}: {shares:.4f}股 @ ¥{close_price:.3f}, 成本: ¥{cost:,.2f}")
+                # 简单模式下只显示基本信息
+                if not self.verbose_trading:
+                    print(f"  买入 {etf_code}: {shares:.4f}股 @ ¥{close_price:.3f}, 成本: ¥{cost:,.2f}")
 
+        # 根据参数决定打印详细程度
+        if self.verbose_trading and dca_transactions:
+            # 详细模式：调用详细信息打印方法
+            self._print_dca_details(date, dca_transactions)
+        else:
+            # 简单模式：只显示基本信息
+            print(f"  定投后现金: ¥{self.cash:,.2f}")
+
+    def _print_initial_buy_details(self, transactions: Dict[str, Dict]):
+        """打印初始建仓的详细信息
+
+        Args:
+            transactions: 交易记录字典，包含股票代码、交易数量、价格等信息
+        """
+        print("\n" + "=" * 80)
+        print("初始建仓交易明细")
+        print("=" * 80)
+
+        # 打印每支股票的交易记录
+        for stock_code, transaction in transactions.items():
+            print(f"\n{transaction['name']} ({stock_code}):")
+            print(f"  目标金额: ¥{transaction['target_amount']:,.2f}")
+            print(f"  买入价格: ¥{transaction['price']:.4f}")
+            print(f"  买入股数: {transaction['shares']:.2f}")
+            print(f"  实际金额: ¥{transaction['actual_amount']:,.2f}")
+
+        # 打印汇总信息
+        total_actual = sum(t['actual_amount'] for t in transactions.values())
+        remaining_cash = self.initial_capital - total_actual
+
+        print(f"\n初始建仓汇总:")
+        print(f"  初始资金: ¥{self.initial_capital:,.2f}")
+        print(f"  总投入金额: ¥{total_actual:,.2f}")
+        print(f"  剩余现金: ¥{remaining_cash:,.2f}")
+        print(f"  建仓完成度: {(total_actual/self.initial_capital)*100:.1f}%")
+        print("=" * 80)
+
+    def _print_dca_details(self, date: pd.Timestamp, dca_transactions: List[Dict]):
+        """
+        打印定投交易的详细信息
+
+        Args:
+            date: 定投日期
+            dca_transactions: 定投交易记录列表
+        """
+        print(f"\n定投 {date.strftime('%Y-%m-%d')}: 投入 ¥{self.dca_amount:,.2f}")
+        print("  定投详情:")
+        print("  " + "="*60)
+        print(f"  {'ETF代码':<8} {'买入股数':<12} {'价格':<10} {'成本':<12}")
+        print("  " + "-"*60)
+
+        for transaction in dca_transactions:
+            etf_code = transaction['etf_code']
+            shares = transaction['shares']
+            price = transaction['price']
+            amount = transaction['amount']
+            print(f"  {etf_code:<8} {shares:<12.4f} ¥{price:<9.3f} ¥{amount:<11,.2f}")
+
+        print("  " + "="*60)
         print(f"  定投后现金: ¥{self.cash:,.2f}")
 
     def _rebalance_portfolio(self, date: pd.Timestamp):
         """
-        执行组合再平衡 - 使用收盘价进行交易
+        执行组合再平衡 - 基于总资产价值进行完全再平衡
 
         Args:
             date: 再平衡日期
         """
-        print(f"\n再平衡 {date.strftime('%Y-%m-%d')}:")
-
-        # 计算当前组合价值
-        total_value = self._calculate_portfolio_value(date)
-        if total_value <= 0:
-            print("  组合价值为0，跳过再平衡")
+        # 计算当前总资产价值（包括ETF和现金）
+        total_assets = self._calculate_portfolio_value(date)
+        if total_assets <= 0:
+            if self.verbose_trading:
+                print("  组合价值为0，跳过再平衡")
             return
 
-        # 计算每个ETF的当前权重和目标权重
-        current_weights = {}
-        target_values = {}
-        total_sell_value = 0
-        total_buy_value = 0
+        # 基本打印信息
+        if not self.verbose_trading:
+            print(f"\n再平衡 {date.strftime('%Y-%m-%d')}: 总资产价值: ¥{total_assets:,.0f}")
+        else:
+            print(f"\n再平衡 {date.strftime('%Y-%m-%d')}:")
 
-        print(f"  当前组合价值: ¥{total_value:,.2f}")
+        # 简单模式下的基本信息
+        if self.verbose_trading:
+            print(f"  总资产价值: ¥{total_assets:,.0f}")
 
-        # 找到当前rebalance周期的开始日期（上一个rebalance日之后的第一天）
-        current_rebalance_start = self._get_rebalance_period_start(date)
+        # 计算每个ETF的目标配置和当前配置的差额
+        rebalance_plan = {}
+        total_sell_needed = 0
+        total_buy_needed = 0
 
-        # 显示详细的rebalancing信息
-        self._print_rebalancing_details(current_rebalance_start, date, total_value)
-
-        # 分析当前持仓和目标调整
-        for i, etf_code in enumerate(self.etf_codes):
-            if etf_code in self.positions and etf_code in self.etf_data:
-                if date in self.etf_data[etf_code].index:
-                    current_price = self.etf_data[etf_code].loc[date, 'close']
-                    current_value = self.positions[etf_code]['shares'] * current_price
-                    current_weight = current_value / total_value
-                    target_weight = self.weights[i]
-                    target_value = total_value * target_weight
-
-                    current_weights[etf_code] = current_weight
-                    target_values[etf_code] = target_value
-
-  
-        # 执行再平衡交易
         for i, etf_code in enumerate(self.etf_codes):
             if etf_code not in self.etf_data or date not in self.etf_data[etf_code].index:
                 continue
 
             current_price = self.etf_data[etf_code].loc[date, 'close']
-            target_value = target_values.get(etf_code, total_value * self.weights[i])
+            target_value = total_assets * self.weights[i]
 
+            # 获取当前持仓
+            current_shares = 0
+            current_value = 0
             if etf_code in self.positions:
-                current_value = self.positions[etf_code]['shares'] * current_price
                 current_shares = self.positions[etf_code]['shares']
+                current_value = current_shares * current_price
 
-                # 需要调整的金额
-                adjust_value = target_value - current_value
+            # 计算需要调整的金额
+            adjust_value = target_value - current_value
 
-                if adjust_value > 0:
-                    # 需要买入
-                    # 正确的交易成本计算：目标投资额需要同时覆盖股票价值和交易成本
-                    shares_to_buy = adjust_value / (current_price * (1 + self.transaction_cost))
-                    cost = shares_to_buy * current_price * (1 + self.transaction_cost)
+            rebalance_plan[etf_code] = {
+                'current_shares': current_shares,
+                'current_value': current_value,
+                'target_value': target_value,
+                'adjust_value': adjust_value,
+                'price': current_price
+            }
 
-                    if cost <= self.cash + 1:  # 允许小幅误差
-                        # 更新持仓
-                        new_shares = current_shares + shares_to_buy
+            if adjust_value > 0:
+                total_buy_needed += adjust_value
+            else:
+                total_sell_needed += abs(adjust_value)
+
+        # 执行再平衡：先卖后买
+        total_sell_proceeds = 0
+        total_buy_cost = 0
+        has_trades = False
+
+        # 第一阶段：执行所有卖出操作
+        for etf_code, plan in rebalance_plan.items():
+            if plan['adjust_value'] < 0:  # 需要卖出
+                shares_to_sell = abs(plan['adjust_value']) / plan['price']
+                shares_to_sell = min(shares_to_sell, plan['current_shares'])  # 不能超过持有数量
+
+                if shares_to_sell > 0:
+                    has_trades = True
+                    sell_proceeds = shares_to_sell * plan['price'] * (1 - self.transaction_cost)
+                    remaining_shares = plan['current_shares'] - shares_to_sell
+
+                    # 更新持仓
+                    if remaining_shares > 0:
+                        remaining_cost_ratio = remaining_shares / plan['current_shares']
+                        new_total_cost = self.positions[etf_code]['total_cost'] * remaining_cost_ratio
+                        avg_cost = new_total_cost / remaining_shares
+
+                        self.positions[etf_code] = {
+                            'shares': remaining_shares,
+                            'avg_cost': avg_cost,
+                            'total_cost': new_total_cost
+                        }
+                    else:
+                        # 全部卖出
+                        del self.positions[etf_code]
+
+                    self.cash += sell_proceeds
+                    total_sell_proceeds += sell_proceeds
+
+                    # 记录交易
+                    self.transactions.append({
+                        'date': date,
+                        'type': 'rebalance_sell',
+                        'etf_code': etf_code,
+                        'shares': shares_to_sell,
+                        'price': plan['price'],
+                        'amount': sell_proceeds,
+                        'cash_after': self.cash
+                    })
+
+                    # 详细模式下显示基本交易信息
+                    if self.verbose_trading:
+                        print(f"  卖出 {etf_code}: {shares_to_sell:.2f}股 @ ¥{plan['price']:.3f}, 收入: ¥{sell_proceeds:,.0f}")
+
+        # 第二阶段：执行所有买入操作
+        available_cash = self.cash  # 包括原有现金和卖出所得
+
+        for etf_code, plan in rebalance_plan.items():
+            if plan['adjust_value'] > 0:  # 需要买入
+                # 计算实际可买入金额（考虑现金限制）
+                max_affordable_value = available_cash / (1 + self.transaction_cost)
+                actual_buy_value = min(plan['adjust_value'], max_affordable_value)
+
+                if actual_buy_value > 0:
+                    has_trades = True
+                    shares_to_buy = actual_buy_value / (plan['price'] * (1 + self.transaction_cost))
+                    cost = shares_to_buy * plan['price'] * (1 + self.transaction_cost)
+
+                    # 更新或新建持仓
+                    if etf_code in self.positions:
+                        new_shares = self.positions[etf_code]['shares'] + shares_to_buy
                         new_total_cost = self.positions[etf_code]['total_cost'] + cost
                         avg_cost = new_total_cost / new_shares
 
@@ -685,97 +847,180 @@ class PortfolioBacktester:
                             'avg_cost': avg_cost,
                             'total_cost': new_total_cost
                         }
-                        self.cash -= cost
-                        total_buy_value += cost
-
-                        # 记录交易
-                        self.transactions.append({
-                            'date': date,
-                            'type': 'rebalance_buy',
-                            'etf_code': etf_code,
-                            'shares': shares_to_buy,
-                            'price': current_price,
-                            'amount': cost,
-                            'cash_after': self.cash
-                        })
-
-                        print(f"  买入 {etf_code}: {shares_to_buy:.4f}股 @ ¥{current_price:.3f}, 成本: ¥{cost:,.2f}")
-
-                elif adjust_value < 0:
-                    # 需要卖出
-                    shares_to_sell = abs(adjust_value) / current_price
-                    shares_to_sell = min(shares_to_sell, current_shares)  # 不能卖出超过持有的数量
-
-                    if shares_to_sell > 0:
-                        sell_proceeds = shares_to_sell * current_price * (1 - self.transaction_cost)
-                        remaining_shares = current_shares - shares_to_sell
-
-                        if remaining_shares > 0:
-                            # 更新持仓
-                            remaining_cost_ratio = remaining_shares / current_shares
-                            new_total_cost = self.positions[etf_code]['total_cost'] * remaining_cost_ratio
-                            avg_cost = new_total_cost / remaining_shares
-
-                            self.positions[etf_code] = {
-                                'shares': remaining_shares,
-                                'avg_cost': avg_cost,
-                                'total_cost': new_total_cost
-                            }
-                        else:
-                            # 全部卖出
-                            del self.positions[etf_code]
-
-                        self.cash += sell_proceeds
-                        total_sell_value += sell_proceeds
-
-                        # 记录交易
-                        self.transactions.append({
-                            'date': date,
-                            'type': 'rebalance_sell',
-                            'etf_code': etf_code,
-                            'shares': shares_to_sell,
-                            'price': current_price,
-                            'amount': sell_proceeds,
-                            'cash_after': self.cash
-                        })
-
-                        print(f"  卖出 {etf_code}: {shares_to_sell:.4f}股 @ ¥{current_price:.3f}, 收入: ¥{sell_proceeds:,.2f}")
-
-            else:
-                # 新建持仓
-                target_value = total_value * self.weights[i]
-                if target_value > 0 and self.cash > 0:
-                    # 正确的交易成本计算：目标投资额需要同时覆盖股票价值和交易成本
-                    # 但需要考虑可用现金的限制
-                    max_affordable_value = self.cash / (1 + self.transaction_cost)
-                    actual_target_value = min(target_value, max_affordable_value)
-                    shares_to_buy = actual_target_value / (current_price * (1 + self.transaction_cost))
-                    cost = shares_to_buy * current_price * (1 + self.transaction_cost)
-
-                    if cost <= self.cash:
+                    else:
                         self.positions[etf_code] = {
                             'shares': shares_to_buy,
-                            'avg_cost': current_price,
+                            'avg_cost': plan['price'],
                             'total_cost': cost
                         }
-                        self.cash -= cost
-                        total_buy_value += cost
 
-                        # 记录交易
-                        self.transactions.append({
-                            'date': date,
-                            'type': 'rebalance_buy',
-                            'etf_code': etf_code,
-                            'shares': shares_to_buy,
-                            'price': current_price,
-                            'amount': cost,
-                            'cash_after': self.cash
-                        })
+                    self.cash -= cost
+                    available_cash -= cost
+                    total_buy_cost += cost
 
-                        print(f"  新建持仓 {etf_code}: {shares_to_buy:.4f}股 @ ¥{current_price:.3f}, 成本: ¥{cost:,.2f}")
+                    # 记录交易
+                    self.transactions.append({
+                        'date': date,
+                        'type': 'rebalance_buy',
+                        'etf_code': etf_code,
+                        'shares': shares_to_buy,
+                        'price': plan['price'],
+                        'amount': cost,
+                        'cash_after': self.cash
+                    })
 
-        print(f"  再平衡后现金: ¥{self.cash:,.2f}")
-        print(f"  总买入: ¥{total_buy_value:,.2f}, 总卖出: ¥{total_sell_value:,.2f}")
+                    # 详细模式下显示基本交易信息
+                    if self.verbose_trading:
+                        print(f"  买入 {etf_code}: {shares_to_buy:.2f}股 @ ¥{plan['price']:.3f}, 成本: ¥{cost:,.0f}")
+
+        # 根据参数决定打印详细程度
+        if self.verbose_trading and has_trades:
+            # 详细模式：调用详细信息打印方法
+            self._print_rebalance_details(date, total_assets, rebalance_plan,
+                                         total_buy_needed, total_sell_needed,
+                                         total_sell_proceeds, total_buy_cost)
+        elif has_trades:
+            # 简单模式：只显示汇总信息
+            print(f"  交易汇总: 卖出¥{total_sell_proceeds:,.0f}, 买入¥{total_buy_cost:,.0f}, 再平衡后: ¥{self._calculate_portfolio_value(date):,.0f}")
+        elif not self.verbose_trading:
+            print("  无需调整")
+
+    def _print_pre_rebalance_analysis(self, date: pd.Timestamp, total_value: float):
+        """
+        打印平衡前的ETF持仓详情（简洁版）
+
+        Args:
+            date: 再平衡日期
+            total_value: 当前组合总价值
+        """
+        print(f"\n  ETF持仓分析:")
+        print("  " + "="*70)
+        print(f"  {'ETF代码':<8} {'股数':<10} {'市值':<12} {'当前权重':<10} {'目标权重':<10} {'偏离':<8}")
+        print("  " + "-"*70)
+
+        for i, etf_code in enumerate(self.etf_codes):
+            # 获取当前持仓信息
+            shares = 0
+            if etf_code in self.positions:
+                shares = self.positions[etf_code]['shares']
+
+            # 获取当前价格
+            price = None
+            if etf_code in self.etf_data and date in self.etf_data[etf_code].index:
+                price = self.etf_data[etf_code].loc[date, 'close']
+
+            market_value = shares * price if price is not None else 0
+            weight = (market_value / total_value * 100) if total_value > 0 else 0
+            target_weight = self.weights[i] * 100
+            weight_diff = weight - target_weight
+
+            print(f"  {etf_code:<8} {shares:<10.2f} ¥{market_value:<11,.0f} {weight:<9.1f}% {target_weight:<9.1f}% {weight_diff:+7.1f}%")
+
+        print("  " + "="*70)
+        print(f"  组合价值: ¥{total_value:,.0f}, 现金: ¥{self.cash:,.0f}")
+        print()
+
+    def _print_rebalance_calculation_details(self, rebalance_plan: Dict, total_buy_needed: float, total_sell_needed: float):
+        """
+        打印再平衡计算的详细过程和交易计划
+
+        Args:
+            rebalance_plan: 再平衡计划字典
+            total_buy_needed: 总需要买入金额
+            total_sell_needed: 总需要卖出金额
+        """
+        print(f"\n  再平衡计算详情:")
+        print("  " + "="*80)
+        print(f"  {'ETF代码':<8} {'当前市值':<12} {'目标市值':<12} {'调整金额':<12} {'调整股数':<10} {'操作类型':<8}")
+        print("  " + "-"*80)
+
+        for etf_code, plan in rebalance_plan.items():
+            current_value = plan['current_value']
+            target_value = plan['target_value']
+            adjust_value = plan['adjust_value']
+            price = plan['price']
+
+            if adjust_value > 0:
+                # 需要买入
+                shares_needed = adjust_value / (price * (1 + self.transaction_cost))
+                action = "买入"
+                print(f"  {etf_code:<8} ¥{current_value:<11,.0f} ¥{target_value:<11,.0f} +¥{adjust_value:<11,.0f} {shares_needed:<9.2f} {action:<8}")
+            elif adjust_value < 0:
+                # 需要卖出
+                shares_to_sell = abs(adjust_value) / price
+                action = "卖出"
+                print(f"  {etf_code:<8} ¥{current_value:<11,.0f} ¥{target_value:<11,.0f} -¥{abs(adjust_value):<11,.0f} {shares_to_sell:<9.2f} {action:<8}")
+            else:
+                # 无需调整
+                action = "无操作"
+                print(f"  {etf_code:<8} ¥{current_value:<11,.0f} ¥{target_value:<11,.0f} ¥{adjust_value:<11,.0f} {'0.00':<9} {action:<8}")
+
+        print("  " + "="*80)
+        print(f"  交易汇总: 预计卖出 ¥{total_sell_needed:,.0f}, 预计买入 ¥{total_buy_needed:,.0f}")
+        print(f"  净调整: {'¥' if total_buy_needed > total_sell_needed else '-¥'}{abs(total_buy_needed - total_sell_needed):,.0f}")
+        print()
+
+    def _print_post_rebalance_summary(self, date: pd.Timestamp, total_value: float):
+        """
+        打印平衡后的ETF持仓摘要（简洁版）
+
+        Args:
+            date: 再平衡日期
+            total_value: 当前组合总价值
+        """
+        # 计算再平衡后的总价值
+        after_value = self._calculate_portfolio_value(date)
+
+        print(f"\n  再平衡后: 组合价值¥{after_value:,.0f}, 现金¥{self.cash:,.0f}")
+
+    def _print_rebalance_details(self, date: pd.Timestamp, total_assets: float, rebalance_plan: Dict,
+                                 total_buy_needed: float, total_sell_needed: float,
+                                 total_sell_proceeds: float, total_buy_cost: float):
+        """
+        打印再平衡的详细信息
+
+        Args:
+            date: 再平衡日期
+            total_assets: 当前总资产价值
+            rebalance_plan: 再平衡计划字典
+            total_buy_needed: 总需要买入金额
+            total_sell_needed: 总需要卖出金额
+            total_sell_proceeds: 实际卖出所得
+            total_buy_cost: 实际买入成本
+        """
+        print(f"\n再平衡 {date.strftime('%Y-%m-%d')}:")
+        print(f"  总资产价值: ¥{total_assets:,.0f}")
+
+        # 显示平衡前的ETF持仓详情
+        self._print_pre_rebalance_analysis(date, total_assets)
+
+        # 显示再平衡计算详情和交易计划
+        self._print_rebalance_calculation_details(rebalance_plan, total_buy_needed, total_sell_needed)
+
+        # 显示实际交易执行情况
+        print(f"  实际交易执行:")
+        print("  " + "="*60)
+        print(f"  {'ETF代码':<8} {'交易类型':<8} {'股数':<12} {'价格':<10} {'金额':<12}")
+        print("  " + "-"*60)
+
+        # 从交易记录中提取当天的再平衡交易
+        rebalance_transactions = [t for t in self.transactions if t['date'] == date and t['type'].startswith('rebalance')]
+
+        for transaction in rebalance_transactions:
+            etf_code = transaction['etf_code']
+            transaction_type = '卖出' if transaction['type'] == 'rebalance_sell' else '买入'
+            shares = transaction['shares']
+            price = transaction['price']
+            amount = transaction['amount']
+            print(f"  {etf_code:<8} {transaction_type:<8} {shares:<12.2f} ¥{price:<9.3f} ¥{amount:<11,.0f}")
+
+        print("  " + "="*60)
+        print(f"  交易汇总: 卖出¥{total_sell_proceeds:,.0f}, 买入¥{total_buy_cost:,.0f}")
+        print(f"  剩余现金: ¥{self.cash:,.0f}")
+
+        # 显示平衡后的ETF持仓详情
+        final_value = self._calculate_portfolio_value(date)
+        self._print_post_rebalance_summary(date, final_value)
 
     def _calculate_portfolio_value(self, date: pd.Timestamp) -> float:
         """
@@ -803,7 +1048,19 @@ class PortfolioBacktester:
 
     def run_backtest(self):
         """
-        运行回测
+        运行回测 - 专注于计算逻辑，减少打印输出
+
+        执行顺序：
+        1. 初始建仓（第一个交易日）
+        2. 逐日处理：
+           - 先执行再平衡（如果当天是再平衡日）
+           - 后执行定投（如果当天是定投日）
+        3. 计算每日组合价值
+
+        优化说明：
+        - 采用"先平衡后定投"策略，避免定投买入后立即卖出
+        - 减少逻辑冲突和交易成本
+        - 更符合实际投资操作逻辑
         """
         # 获取数据
         self.fetch_data()
@@ -817,56 +1074,61 @@ class PortfolioBacktester:
         # 过滤回测期间的交易日
         trading_dates = [date for date in trading_dates if date >= self.start_date and date <= self.end_date]
 
-        print(f"\n开始回测，共 {len(trading_dates)} 个交易日")
-
         # 计算定投日期
         self.dca_dates = self._get_dca_dates(trading_dates)
-        if self.enable_dca:
-            print(f"定投计划: {self.dca_freq}, 共 {len(self.dca_dates)} 次定投")
-            for d in self.dca_dates[:5]:  # 只显示前5个
-                print(f"  {d.strftime('%Y-%m-%d')}")
-            if len(self.dca_dates) > 5:
-                print(f"  ... 还有 {len(self.dca_dates) - 5} 次定投")
 
         # 计算再平衡日期
         self.rebalance_dates = self._get_rebalance_dates(trading_dates)
-        if self.enable_rebalancing:
-            print(f"再平衡计划: {self.rebalance_freq}, 阈值 {self.rebalance_threshold:.1%}, 共 {len(self.rebalance_dates)} 次再平衡")
-            for d in self.rebalance_dates[:5]:  # 只显示前5个
-                print(f"  {d.strftime('%Y-%m-%d')}")
-            if len(self.rebalance_dates) > 5:
-                print(f"  ... 还有 {len(self.rebalance_dates) - 5} 次再平衡")
 
         # 第一天初始建仓
         if trading_dates:
             self._initial_buy(trading_dates[0])
 
-        # 逐日更新
+        # 逐日更新 - 采用先平衡后定投策略
         for i, date in enumerate(trading_dates):
-            # 检查是否是定投日
-            if date in self.dca_dates:
-                self._dca_buy(date)
-
-            # 检查是否是再平衡日
+            # 先执行再平衡：调整现有组合到目标权重
             if date in self.rebalance_dates:
                 self._rebalance_portfolio(date)
+
+            # 后执行定投：将新资金按目标权重投入
+            if date in self.dca_dates:
+                self._dca_buy(date)
 
             # 计算当日组合价值
             portfolio_value = self._calculate_portfolio_value(date)
 
+            # 记录每日持仓详情
+            daily_position_detail = {}
+            total_value = portfolio_value
+
+            for i, etf_code in enumerate(self.etf_codes):
+                if etf_code in self.positions and etf_code in self.etf_data:
+                    if date in self.etf_data[etf_code].index:
+                        close_price = self.etf_data[etf_code].loc[date, 'close']
+                        shares = self.positions[etf_code]['shares']
+                        value = shares * close_price
+                        weight = value / total_value if total_value > 0 else 0
+
+                        daily_position_detail[etf_code] = {
+                            'shares': shares,
+                            'value': value,
+                            'weight': weight,
+                            'price': close_price
+                        }
+
+            # 添加现金信息
+            daily_position_detail['cash'] = {
+                'value': self.cash,
+                'weight': self.cash / total_value if total_value > 0 else 0
+            }
+
             # 记录
             self.daily_dates.append(date)
             self.daily_values.append(portfolio_value)
-
-            # # 每20天打印一次进度
-            # if i % 20 == 0:
-            #     print(f"  处理进度: {date.strftime('%Y-%m-%d')}, 组合价值: ¥{portfolio_value:,.2f}")
+            self.daily_positions[date] = daily_position_detail
 
         # 计算回测结果
         self._calculate_results()
-
-        print("\n回测完成!")
-        self.print_results()
 
     def _calculate_results(self):
         """计算回测结果指标"""
@@ -901,12 +1163,43 @@ class PortfolioBacktester:
         drawdown = (value_series - rolling_max) / rolling_max
         max_drawdown = drawdown.min() * 100
 
-        # 年化波动率
-        volatility = returns.std() * np.sqrt(252) * 100
+        # 计算最大回撤回补周期
+        max_dd_idx = drawdown.idxmin()  # 最大回撤发生的日期
+        max_dd_value = drawdown.min()    # 最大回撤深度
 
-        # 夏普比率（假设无风险利率为3%）
-        rf_rate = 0.03
-        sharpe_ratio = (annual_return - rf_rate) / (volatility / 100) if volatility > 0 else 0
+        # 找到对应的滚动最高点（前期高点）
+        pre_peak_value = rolling_max.loc[max_dd_idx]
+
+        # 从最大回撤点开始，找到首次超过前期高点的日期
+        recovery_idx = None
+        recovery_date = None
+
+        # 检查最大回撤之后的所有日期
+        after_max_dd = value_series.loc[max_dd_idx:]
+
+        for date, value in after_max_dd.items():
+            if value >= pre_peak_value:
+                recovery_idx = date
+                recovery_date = date
+                break
+
+        # 计算回补周期
+        if recovery_idx is not None:
+            # 交易日数
+            max_drawdown_recovery_days = (recovery_idx - max_dd_idx).days
+            # 日历天数（更直观的显示）
+            max_drawdown_recovery_calendar_days = (recovery_idx - max_dd_idx).days
+        else:
+            # 如果到回测结束都未回补
+            max_drawdown_recovery_days = None
+            max_drawdown_recovery_calendar_days = None
+            recovery_idx = None
+
+        # 年化波动率（小数形式）
+        volatility = returns.std() * np.sqrt(252)
+
+        # 夏普比率计算
+        sharpe_ratio = (annual_return - self.risk_free_rate) / volatility if volatility > 0 else 0
 
         self.results = {
             'initial_capital': self.initial_capital,
@@ -915,8 +1208,14 @@ class PortfolioBacktester:
             'total_return': total_return,
             'annual_return': annual_return_pct,
             'max_drawdown': max_drawdown,
-            'volatility': volatility,
+            'max_drawdown_date': max_dd_idx,
+            'pre_peak_value': pre_peak_value,
+            'recovery_date': recovery_idx,
+            'max_drawdown_recovery_days': max_drawdown_recovery_days,
+            'max_drawdown_recovery_calendar_days': max_drawdown_recovery_calendar_days,
+            'volatility': volatility * 100,
             'sharpe_ratio': sharpe_ratio,
+            'risk_free_rate': self.risk_free_rate,
             'trading_days': len(self.daily_values),
             'start_date': self.start_date,
             'end_date': self.end_date,
@@ -942,8 +1241,19 @@ class PortfolioBacktester:
         print(f"总收益率: {self.results['total_return']:.2f}%")
         print(f"年化收益率: {self.results['annual_return']:.2f}%")
         print(f"最大回撤: {self.results['max_drawdown']:.2f}%")
+
+        # 显示最大回撤回补周期
+        if self.results['max_drawdown_recovery_days'] is not None:
+            print(f"最大回撤回补周期: {self.results['max_drawdown_recovery_days']}个交易日 "
+                  f"({self.results['max_drawdown_recovery_calendar_days']}天日历时间)")
+            print(f"最大回撤发生: {self.results['max_drawdown_date'].strftime('%Y-%m-%d')}")
+            print(f"回补完成: {self.results['recovery_date'].strftime('%Y-%m-%d')}")
+        else:
+            print(f"最大回撤回补周期: 未完全回补 (截至回测结束)")
+            print(f"最大回撤发生: {self.results['max_drawdown_date'].strftime('%Y-%m-%d')}")
+
         print(f"年化波动率: {self.results['volatility']:.2f}%")
-        print(f"夏普比率: {self.results['sharpe_ratio']:.3f}")
+        print(f"夏普比率: {self.results['sharpe_ratio']:.3f} (无风险利率: {self.results['risk_free_rate']:.1%})")
         print(f"交易天数: {self.results['trading_days']}")
         print(f"回测期间: {self.results['start_date'].strftime('%Y-%m-%d')} 至 {self.results['end_date'].strftime('%Y-%m-%d')}")
 
@@ -1065,6 +1375,853 @@ class PortfolioBacktester:
 
                 # 打印该ETF的信息
                 print(f"  {etf_code}: ¥{start_value:,.0f}({start_weight:.1f}%) → ¥{before_value:,.0f}({before_weight:.1f}%) → ¥{target_value:,.0f}({target_weight:.0f}%)   {trade_info}")
+
+    def generate_report(self, show_plot=True):
+        """
+        生成完整的可视化报告 - 整合图表显示和汇总信息输出
+
+        Args:
+            show_plot: 是否显示图表
+        """
+        # 显示回测结果汇总
+        self.print_results()
+
+        if not self.daily_values or not self.daily_dates:
+            print("没有数据可用于生成图表")
+            return
+
+        if show_plot:
+            self._plot_combined_dashboard()
+
+
+    def _plot_combined_dashboard(self):
+        """生成包含5个子图的合并仪表板"""
+        # 创建5x1的子图布局，前两个图独占一排，后面三个图共享一排
+        fig = make_subplots(
+            rows=5, cols=1,
+            subplot_titles=('账户资金变化', '累计收益率', '回撤分析', '月度收益率热力图', '年度收益率'),
+            specs=[
+                [{"secondary_y": False}],  # 账户资金变化
+                [{"secondary_y": False}],  # 累计收益率
+                [{"secondary_y": False}],  # 回撤分析
+                [{"type": "heatmap"}],    # 月度收益率热力图
+                [{"type": "bar"}]         # 年度收益率
+            ],
+            vertical_spacing=0.08
+        )
+
+        # 1. 账户资金变化折线图 (第1行)
+        self._add_portfolio_value_subplot(fig, row=1, col=1)
+
+        # 2. 收益率折线图 (第2行)
+        self._add_returns_subplot(fig, row=2, col=1)
+
+        # 3. 回撤图 (第3行)
+        self._add_drawdown_subplot(fig, row=3, col=1)
+
+        # 4. 月度收益率热力图 (第4行)
+        self._add_monthly_heatmap_subplot(fig, row=4, col=1)
+
+        # 5. 年度收益率柱状图 (第5行)
+        self._add_annual_returns_subplot(fig, row=5, col=1)
+
+        # 更新整体布局
+        fig.update_layout(
+            title={
+                'text': f'投资组合回测报告 ({self.results["start_date"].strftime("%Y-%m-%d")} 至 {self.results["end_date"].strftime("%Y-%m-%d")})',
+                'x': 0.5,
+                'font': {'size': 24}
+            },
+            template='plotly_white',
+            showlegend=True,
+            height=2400,  # 增加高度以容纳更多行
+            width=1000,  # 增加宽度以拉长x轴
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+
+        # 显示图表
+        pyo.plot(fig, filename='portfolio_combined_dashboard.html', auto_open=True)
+
+    def _add_portfolio_value_subplot(self, fig, row, col):
+        """添加账户资金变化子图"""
+        # 创建时间序列数据，确保正确的DatetimeIndex
+        dates = pd.to_datetime(self.daily_dates)
+
+        # 主线：总资产价值
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=self.daily_values,
+            mode='lines',
+            name='总资产价值',
+            line=dict(color='#2E86AB', width=2),
+            hovertemplate='<b>%{x|%Y-%m-%d}</b><br>' +
+                         '总资产: ¥%{y:,.0f}<extra></extra>'
+        ), row=row, col=col)
+
+        # 添加再平衡标记
+        if self.rebalance_dates:
+            rebalance_values = []
+            for date in self.rebalance_dates:
+                # 找到最接近的日期索引
+                date_timestamp = pd.to_datetime(date)
+                closest_idx = min(range(len(dates)), key=lambda i: abs(dates[i] - date_timestamp))
+                rebalance_values.append(self.daily_values[closest_idx])
+
+            fig.add_trace(go.Scatter(
+                x=pd.to_datetime(self.rebalance_dates),
+                y=rebalance_values,
+                mode='markers',
+                name='再平衡',
+                marker=dict(color='red', size=6, symbol='triangle-down'),
+                hovertemplate='<b>再平衡</b><br>日期: %{x|%Y-%m-%d}<br>资产: ¥%{y:,.0f}<extra></extra>',
+                showlegend=False
+            ), row=row, col=col)
+
+        # 计算Y轴范围（基于实际数据，上下浮动10%）
+        min_value = min(self.daily_values)
+        max_value = max(self.daily_values)
+        y_range = max_value - min_value
+        y_padding = y_range * 0.1
+        y_min = min_value - y_padding
+        y_max = max_value + y_padding
+
+        # 更新子图布局
+        fig.update_xaxes(title_text="日期", row=row, col=col)
+        fig.update_yaxes(
+            title_text="账户价值 (¥)",
+            tickformat=',.0f',
+            range=[y_min, y_max],
+            row=row,
+            col=col
+        )
+
+        # 确保显示完整的时间范围
+        fig.update_xaxes(range=[dates.min(), dates.max()], row=row, col=col)
+
+    def _add_returns_subplot(self, fig, row, col):
+        """添加收益率子图"""
+        total_investment = self.results['total_investment']
+        returns_data = [(value / total_investment - 1) * 100 for value in self.daily_values]
+        dates = pd.to_datetime(self.daily_dates)
+
+        # 主线：累计收益率
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=returns_data,
+            mode='lines',
+            name='累计收益率',
+            line=dict(color='#1f77b4', width=2),
+            hovertemplate='<b>%{x|%Y-%m-%d}</b><br>' +
+                         '收益率: %{y:.2f}%<extra></extra>',
+            showlegend=False
+        ), row=row, col=col)
+
+        # 添加0%基准线
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", row=row, col=col)
+
+        # 更新子图布局
+        fig.update_xaxes(title_text="日期", row=row, col=col)
+        fig.update_yaxes(title_text="收益率 (%)", tickformat='.1f', row=row, col=col)
+
+    def _add_drawdown_subplot(self, fig, row, col):
+        """添加回撤子图"""
+        # 创建时间序列
+        dates = pd.to_datetime(self.daily_dates)
+        value_series = pd.Series(self.daily_values, index=dates)
+        rolling_max = value_series.expanding().max()
+        drawdown = (value_series - rolling_max) / rolling_max * 100
+
+        # 回撤线
+        fig.add_trace(go.Scatter(
+            x=drawdown.index,
+            y=drawdown.values,
+            mode='lines',
+            name='回撤',
+            line=dict(color='red', width=2),
+            fill='tonexty',
+            fillcolor='rgba(255,0,0,0.2)',
+            hovertemplate='<b>%{x|%Y-%m-%d}</b><br>' +
+                         '回撤: %{y:.2f}%<extra></extra>',
+            showlegend=False
+        ), row=row, col=col)
+
+        # 标记最大回撤点
+        max_dd_idx = drawdown.idxmin()
+        max_dd_value = drawdown.min()
+
+        fig.add_trace(go.Scatter(
+            x=[max_dd_idx],
+            y=[max_dd_value],
+            mode='markers',
+            name='最大回撤',
+            marker=dict(color='darkred', size=10, symbol='x'),
+            hovertemplate='<b>最大回撤</b><br>' +
+                         '日期: %{x|%Y-%m-%d}<br>' +
+                         '回撤: %{y:.2f}%<extra></extra>',
+            showlegend=False
+        ), row=row, col=col)
+
+        # 更新子图布局
+        fig.update_xaxes(title_text="日期", row=row, col=col)
+        fig.update_yaxes(title_text="回撤 (%)", tickformat='.1f', row=row, col=col)
+
+    def _add_monthly_heatmap_subplot(self, fig, row, col):
+        """添加月度收益率热力图子图"""
+        # 准备月度数据
+        df = pd.DataFrame({
+            'date': self.daily_dates,
+            'value': self.daily_values
+        })
+        df['date'] = pd.to_datetime(df['date'])
+        df['year'] = df['date'].dt.year
+        df['month'] = df['date'].dt.month
+
+        # 计算月度收益率
+        monthly_data = []
+        for (year, month), group in df.groupby(['year', 'month']):
+            if len(group) > 1:
+                month_start = group.iloc[0]['value']
+                month_end = group.iloc[-1]['value']
+                month_return = (month_end / month_start - 1) * 100
+                monthly_data.append({
+                    'year': year,
+                    'month': month,
+                    'return': month_return
+                })
+
+        if not monthly_data:
+            return
+
+        # 创建数据框
+        heatmap_df = pd.DataFrame(monthly_data)
+        heatmap_pivot = heatmap_df.pivot(index='year', columns='month', values='return')
+
+        # 确保年份是整数类型
+        years = heatmap_pivot.index.astype(int)
+
+        # 添加热力图
+        fig.add_trace(go.Heatmap(
+            z=heatmap_pivot.values,
+            x=heatmap_pivot.columns,
+            y=years,
+            colorscale='RdYlGn',
+            text=heatmap_pivot.round(2).values,
+            texttemplate='%{text}%',
+            textfont=dict(size=8),
+            hoverongaps=False,
+            colorbar=dict(
+                title="收益率 (%)",
+                title_side="right",
+                len=0.4
+            ),
+            hovertemplate='年份: %{y}<br>月份: %{x}<br>收益率: %{z:.2f}%<extra></extra>',
+            showscale=False
+        ), row=row, col=col)
+
+        # 更新子图布局
+        fig.update_xaxes(title_text="月份", row=row, col=col)
+        fig.update_yaxes(
+            title_text="年份",
+            autorange="reversed",
+            tickmode='array',
+            tickvals=years,
+            ticktext=years,
+            row=row,
+            col=col
+        )
+
+    def _add_annual_returns_subplot(self, fig, row, col):
+        """添加年度收益率柱状图子图"""
+        # 准备年度数据
+        df = pd.DataFrame({
+            'date': self.daily_dates,
+            'value': self.daily_values
+        })
+        df['date'] = pd.to_datetime(df['date'])
+        df['year'] = df['date'].dt.year
+
+        # 计算年度收益率
+        annual_data = []
+        for year, group in df.groupby('year'):
+            if len(group) > 1:
+                year_start = group.iloc[0]['value']
+                year_end = group.iloc[-1]['value']
+                year_return = (year_end / year_start - 1) * 100
+                annual_data.append({
+                    'year': year,
+                    'return': year_return
+                })
+
+        if not annual_data:
+            return
+
+        # 创建数据框
+        annual_df = pd.DataFrame(annual_data)
+
+        # 确定颜色（正收益绿色，负收益红色）
+        colors = ['green' if ret >= 0 else 'red' for ret in annual_df['return']]
+
+        # 添加柱状图
+        fig.add_trace(go.Bar(
+            x=annual_df['year'],
+            y=annual_df['return'],
+            name='年度收益率',
+            marker_color=colors,
+            text=annual_df['return'].round(2),
+            texttemplate='%{text}%',
+            textposition='auto',
+            textfont=dict(size=10),
+            hovertemplate='<b>%{x}年</b><br>' +
+                         '收益率: %{y:.2f}%<extra></extra>',
+            showlegend=False
+        ), row=row, col=col)
+
+        # 添加0%基准线
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", row=row, col=col)
+
+        # 添加关键指标汇总注释
+        stats_text = f"""
+        <b>关键指标汇总</b><br>
+        总收益率: {self.results['total_return']:.2f}%<br>
+        年化收益率: {self.results['annual_return']:.2f}%<br>
+        最大回撤: {self.results['max_drawdown']:.2f}%<br>
+        夏普比率: {self.results['sharpe_ratio']:.3f}<br>
+        年化波动率: {self.results['volatility']:.2f}%
+        """
+
+        fig.add_annotation(
+            text=stats_text,
+            xref="x domain",
+            yref="y domain",
+            x=0.98,
+            y=0.98,
+            xanchor="right",
+            yanchor="top",
+            showarrow=False,
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="gray",
+            borderwidth=1,
+            font=dict(size=10),
+            align="right",
+            row=row,
+            col=col
+        )
+
+        # 更新子图布局
+        fig.update_xaxes(title_text="年份", row=row, col=col)
+        fig.update_yaxes(title_text="收益率 (%)", tickformat='.1f', row=row, col=col)
+
+    def _add_summary_stats_subplot(self, fig, row, col):
+        """添加汇总统计信息子图"""
+        # 创建统计信息文本
+        stats_text = f"""
+        <b>回测汇总统计</b><br><br>
+        <b>投入情况:</b><br>
+        初始资金: ¥{self.results['initial_capital']:,.0f}<br>
+        总投入: ¥{self.results['total_investment']:,.0f}<br>
+        最终价值: ¥{self.results['final_value']:,.0f}<br><br>
+
+        <b>收益表现:</b><br>
+        总收益率: {self.results['total_return']:.2f}%<br>
+        年化收益率: {self.results['annual_return']:.2f}%<br>
+        最大回撤: {self.results['max_drawdown']:.2f}%<br>
+        年化波动率: {self.results['volatility']:.2f}%<br>
+        夏普比率: {self.results['sharpe_ratio']:.3f}<br><br>
+
+        <b>交易统计:</b><br>
+        交易天数: {self.results['trading_days']}天<br>
+        再平衡次数: {self.results['rebalance_count']}次<br>
+        """
+
+        # 添加文本作为注释
+        fig.add_annotation(
+            text=stats_text,
+            xref="x domain",
+            yref="y domain",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=14),
+            align="center",
+            row=row,
+            col=col
+        )
+
+        # 隐藏坐标轴
+        fig.update_xaxes(visible=False, row=row, col=col)
+        fig.update_yaxes(visible=False, row=row, col=col)
+
+    def _plot_portfolio_value(self):
+        """绘制账户资金变化折线图"""
+        # 准备数据
+        df = pd.DataFrame({
+            'date': self.daily_dates,
+            'value': self.daily_values
+        })
+        df['date'] = pd.to_datetime(df['date'])
+
+        # 创建图表
+        fig = go.Figure()
+
+        # 主线：总资产价值
+        fig.add_trace(go.Scatter(
+            x=df['date'],
+            y=df['value'],
+            mode='lines',
+            name='总资产价值',
+            line=dict(color='#2E86AB', width=2),
+            hovertemplate='<b>%{x}</b><br>' +
+                         '总资产: ¥%{y:,.0f}<extra></extra>'
+        ))
+
+        # 准备悬停信息
+        hover_texts = []
+        for i, date in enumerate(df['date']):
+            if date in self.daily_positions:
+                pos_info = self.daily_positions[date]
+                hover_text = f"<b>{date.strftime('%Y-%m-%d')}</b><br>"
+                hover_text += f"总资产: ¥{df.loc[i, 'value']:,.0f}<br><br>"
+
+                # ETF持仓信息
+                for etf_code in self.etf_codes:
+                    if etf_code in pos_info:
+                        info = pos_info[etf_code]
+                        hover_text += f"{etf_code}: ¥{info['value']:,.0f} ({info['weight']:.1%})<br>"
+
+                # 现金信息
+                if 'cash' in pos_info:
+                    cash_info = pos_info['cash']
+                    hover_text += f"现金: ¥{cash_info['value']:,.0f} ({cash_info['weight']:.1%})"
+
+                hover_texts.append(hover_text)
+            else:
+                hover_texts.append(f"<b>{date.strftime('%Y-%m-%d')}</b><br>总资产: ¥{df.loc[i, 'value']:,.0f}")
+
+        # 添加再平衡标记
+        if self.rebalance_dates:
+            rebalance_values = []
+            for date in self.rebalance_dates:
+                # 找到最接近的日期索引
+                closest_idx = min(range(len(df)), key=lambda i: abs(df['date'][i] - date))
+                rebalance_values.append(df.loc[closest_idx, 'value'])
+
+            fig.add_trace(go.Scatter(
+                x=self.rebalance_dates,
+                y=rebalance_values,
+                mode='markers',
+                name='再平衡',
+                marker=dict(color='red', size=8, symbol='triangle-down'),
+                hovertemplate='<b>再平衡</b><br>日期: %{x}<br>资产: ¥%{y:,.0f}<extra></extra>'
+            ))
+
+        # 添加定投标记
+        if self.dca_dates:
+            dca_values = []
+            for date in self.dca_dates:
+                closest_idx = min(range(len(df)), key=lambda i: abs(df['date'][i] - date))
+                dca_values.append(df.loc[closest_idx, 'value'])
+
+            fig.add_trace(go.Scatter(
+                x=self.dca_dates,
+                y=dca_values,
+                mode='markers',
+                name='定投',
+                marker=dict(color='green', size=8, symbol='circle'),
+                hovertemplate='<b>定投</b><br>日期: %{x}<br>资产: ¥%{y:,.0f}<extra></extra>'
+            ))
+
+        # 更新布局
+        fig.update_layout(
+            title={
+                'text': '账户资金变化',
+                'x': 0.5,
+                'font': {'size': 20}
+            },
+            xaxis_title='日期',
+            yaxis_title='账户价值 (¥)',
+            hovermode='x unified',
+            template='plotly_white',
+            height=600,
+            showlegend=True
+        )
+
+        # 设置y轴格式
+        fig.update_yaxes(tickformat=',.0f')
+
+        # 显示图表
+        pyo.plot(fig, filename='portfolio_value.html', auto_open=True)
+
+    def _plot_returns(self):
+        """绘制收益率折线图"""
+        # 准备数据
+        total_investment = self.results['total_investment']
+        returns_data = [(value / total_investment - 1) * 100 for value in self.daily_values]
+
+        df = pd.DataFrame({
+            'date': self.daily_dates,
+            'return_pct': returns_data
+        })
+        df['date'] = pd.to_datetime(df['date'])
+
+        # 创建图表
+        fig = go.Figure()
+
+        # 主线：累计收益率
+        fig.add_trace(go.Scatter(
+            x=df['date'],
+            y=df['return_pct'],
+            mode='lines',
+            name='累计收益率',
+            line=dict(color='#1f77b4', width=2),
+            hovertemplate='<b>%{x}</b><br>' +
+                         '收益率: %{y:.2f}%<extra></extra>'
+        ))
+
+        # 添加0%基准线
+        fig.add_hline(y=0, line_dash="dash", line_color="gray",
+                     annotation_text="盈亏平衡线", annotation_position="bottom right")
+
+        # 准备悬停信息
+        custom_data = []
+        for i, date in enumerate(df['date']):
+            if date in self.daily_positions:
+                pos_info = self.daily_positions[date]
+                custom_info = {
+                    'date': date.strftime('%Y-%m-%d'),
+                    'return_pct': df.loc[i, 'return_pct'],
+                    'positions': {}
+                }
+
+                # ETF持仓信息
+                for etf_code in self.etf_codes:
+                    if etf_code in pos_info:
+                        info = pos_info[etf_code]
+                        custom_info['positions'][etf_code] = {
+                            'value': info['value'],
+                            'weight': info['weight']
+                        }
+
+                # 现金信息
+                if 'cash' in pos_info:
+                    custom_info['positions']['cash'] = {
+                        'value': pos_info['cash']['value'],
+                        'weight': pos_info['cash']['weight']
+                    }
+
+                custom_data.append(custom_info)
+
+        # 更新悬停模板
+        fig.update_traces(
+            customdata=custom_data,
+            hovertemplate='<b>%{customdata.date}</b><br>' +
+                         '收益率: %{y:.2f}%<br><br>' +
+                         '<b>持仓分布:</b><br>' +
+                         '%{customdata.positions[511010].value:,.0f} (511010)<br>' +
+                         '%{customdata.positions[510880].value:,.0f} (510880)<br>' +
+                         '%{customdata.positions[518880].value:,.0f} (518880)<br>' +
+                         '%{customdata.positions[513100].value:,.0f} (513100)<br>' +
+                         '现金: %{customdata.positions.cash.value:,.0f}<extra></extra>'
+        )
+
+        # 更新布局
+        fig.update_layout(
+            title={
+                'text': '累计收益率变化',
+                'x': 0.5,
+                'font': {'size': 20}
+            },
+            xaxis_title='日期',
+            yaxis_title='收益率 (%)',
+            hovermode='x unified',
+            template='plotly_white',
+            height=600,
+            showlegend=False
+        )
+
+        # 设置y轴格式
+        fig.update_yaxes(tickformat='.1f')
+
+        # 显示图表
+        pyo.plot(fig, filename='portfolio_returns.html', auto_open=True)
+
+    def _plot_drawdown(self):
+        """绘制回撤图"""
+        # 准备数据
+        value_series = pd.Series(self.daily_values, index=self.daily_dates)
+        rolling_max = value_series.expanding().max()
+        drawdown = (value_series - rolling_max) / rolling_max * 100
+
+        df = pd.DataFrame({
+            'date': drawdown.index,
+            'drawdown': drawdown.values
+        })
+        df['date'] = pd.to_datetime(df['date'])
+
+        # 创建图表
+        fig = go.Figure()
+
+        # 回撤线
+        fig.add_trace(go.Scatter(
+            x=df['date'],
+            y=df['drawdown'],
+            mode='lines',
+            name='回撤',
+            line=dict(color='red', width=2),
+            fill='tonexty',
+            fillcolor='rgba(255,0,0,0.2)',
+            hovertemplate='<b>%{x}</b><br>' +
+                         '回撤: %{y:.2f}%<extra></extra>'
+        ))
+
+        # 标记最大回撤点
+        max_dd_idx = df['drawdown'].idxmin()
+        max_dd_value = df['drawdown'].min()
+
+        fig.add_trace(go.Scatter(
+            x=[max_dd_idx],
+            y=[max_dd_value],
+            mode='markers',
+            name='最大回撤',
+            marker=dict(color='darkred', size=12, symbol='x'),
+            hovertemplate='<b>最大回撤</b><br>' +
+                         '日期: %{x}<br>' +
+                         '回撤: %{y:.2f}%<extra></extra>'
+        ))
+
+        # 如果有回补完成，标记回补点
+        if self.results['recovery_date'] is not None:
+            recovery_date = self.results['recovery_date']
+            recovery_idx = df.index[df['date'] == recovery_date].tolist()
+            if recovery_idx:
+                recovery_idx = recovery_idx[0]
+                recovery_value = df.loc[recovery_idx, 'drawdown']
+
+                fig.add_trace(go.Scatter(
+                    x=[recovery_date],
+                    y=[recovery_value],
+                    mode='markers',
+                    name='回补完成',
+                    marker=dict(color='green', size=12, symbol='circle'),
+                    hovertemplate='<b>回补完成</b><br>' +
+                                 '日期: %{x}<br>' +
+                                 '回撤: %{y:.2f}%<extra></extra>'
+                ))
+
+        # 更新布局
+        fig.update_layout(
+            title={
+                'text': '回撤分析',
+                'x': 0.5,
+                'font': {'size': 20}
+            },
+            xaxis_title='日期',
+            yaxis_title='回撤 (%)',
+            hovermode='x unified',
+            template='plotly_white',
+            height=600,
+            showlegend=False
+        )
+
+        # 设置y轴格式
+        fig.update_yaxes(tickformat='.1f')
+
+        # 显示图表
+        pyo.plot(fig, filename='portfolio_drawdown.html', auto_open=True)
+
+    def _plot_monthly_heatmap(self):
+        """绘制月度收益率heatmap"""
+        # 准备月度数据
+        df = pd.DataFrame({
+            'date': self.daily_dates,
+            'value': self.daily_values
+        })
+        df['date'] = pd.to_datetime(df['date'])
+        df['year'] = df['date'].dt.year
+        df['month'] = df['date'].dt.month
+
+        # 计算月度收益率
+        monthly_returns = []
+        monthly_data = []
+        etf_monthly_data = {etf: [] for etf in self.etf_codes}
+
+        for (year, month), group in df.groupby(['year', 'month']):
+            if len(group) > 1:
+                month_start = group.iloc[0]['value']
+                month_end = group.iloc[-1]['value']
+                month_return = (month_end / month_start - 1) * 100
+                monthly_returns.append(month_return)
+                monthly_data.append({
+                    'year': year,
+                    'month': month,
+                    'return': month_return,
+                    'start_value': month_start,
+                    'end_value': month_end
+                })
+
+                # 计算各ETF在该月的贡献度
+                for etf_code in self.etf_codes:
+                    etf_contributions = []
+                    for date in group['date']:
+                        if date in self.daily_positions:
+                            pos_info = self.daily_positions[date]
+                            if etf_code in pos_info:
+                                etf_contributions.append(pos_info[etf_code]['value'])
+
+                    if len(etf_contributions) > 1:
+                        etf_start = etf_contributions[0]
+                        etf_end = etf_contributions[-1]
+                        etf_month_return = (etf_end / etf_start - 1) * 100
+                        etf_monthly_data[etf_code].append(etf_month_return)
+                    else:
+                        etf_monthly_data[etf_code].append(0)
+
+        if not monthly_data:
+            print("没有足够的月度数据生成热力图")
+            return
+
+        # 创建数据框
+        heatmap_df = pd.DataFrame(monthly_data)
+        heatmap_pivot = heatmap_df.pivot(index='year', columns='month', values='return')
+
+        # 创建热力图
+        fig = go.Figure(data=go.Heatmap(
+            z=heatmap_pivot.values,
+            x=heatmap_pivot.columns,
+            y=heatmap_pivot.index,
+            colorscale='RdYlGn',
+            text=heatmap_pivot.round(2).values,
+            texttemplate='%{text}%',
+            textfont=dict(size=10),
+            hoverongaps=False,
+            colorbar=dict(
+                title="收益率 (%)",
+                title_side="right"
+            ),
+            hovertemplate='年份: %{y}<br>月份: %{x}<br>收益率: %{z:.2f}%<extra></extra>'
+        ))
+
+        # 更新布局
+        fig.update_layout(
+            title={
+                'text': '月度收益率热力图',
+                'x': 0.5,
+                'font': {'size': 20}
+            },
+            xaxis_title='月份',
+            yaxis_title='年份',
+            template='plotly_white',
+            height=600,
+            width=800
+        )
+
+        # 设置月份标签
+        month_names = ['1月', '2月', '3月', '4月', '5月', '6月',
+                       '7月', '8月', '9月', '10月', '11月', '12月']
+        fig.update_xaxes(ticktext=month_names, tickvals=list(range(1, 13)))
+
+        # 显示图表
+        pyo.plot(fig, filename='monthly_returns_heatmap.html', auto_open=True)
+
+    def _plot_annual_returns(self):
+        """绘制年度收益率柱状图"""
+        # 准备年度数据
+        df = pd.DataFrame({
+            'date': self.daily_dates,
+            'value': self.daily_values
+        })
+        df['date'] = pd.to_datetime(df['date'])
+        df['year'] = df['date'].dt.year
+
+        # 计算年度收益率
+        annual_returns = []
+        annual_data = []
+        etf_annual_data = {etf: [] for etf in self.etf_codes}
+
+        for year, group in df.groupby('year'):
+            if len(group) > 1:
+                year_start = group.iloc[0]['value']
+                year_end = group.iloc[-1]['value']
+                year_return = (year_end / year_start - 1) * 100
+                annual_returns.append(year_return)
+                annual_data.append({
+                    'year': year,
+                    'return': year_return,
+                    'start_value': year_start,
+                    'end_value': year_end
+                })
+
+                # 计算各ETF年度贡献度
+                for etf_code in self.etf_codes:
+                    etf_contributions = []
+                    for date in group['date']:
+                        if date in self.daily_positions:
+                            pos_info = self.daily_positions[date]
+                            if etf_code in pos_info:
+                                etf_contributions.append(pos_info[etf_code]['value'])
+
+                    if len(etf_contributions) > 1:
+                        etf_start = etf_contributions[0]
+                        etf_end = etf_contributions[-1]
+                        etf_annual_return = (etf_end / etf_start - 1) * 100
+                        etf_annual_data[etf_code].append(etf_annual_return)
+                    else:
+                        etf_annual_data[etf_code].append(0)
+
+        if not annual_data:
+            print("没有足够的年度数据生成柱状图")
+            return
+
+        # 创建数据框
+        annual_df = pd.DataFrame(annual_data)
+
+        # 确定颜色（正收益绿色，负收益红色）
+        colors = ['green' if ret >= 0 else 'red' for ret in annual_df['return']]
+
+        # 创建柱状图
+        fig = go.Figure(data=[go.Bar(
+            x=annual_df['year'],
+            y=annual_df['return'],
+            name='年度收益率',
+            marker_color=colors,
+            text=annual_df['return'].round(2),
+            texttemplate='%{text}%',
+            textposition='auto',
+            hovertemplate='<b>%{x}年</b><br>' +
+                         '收益率: %{y:.2f}%<br>' +
+                         '期初: ¥%{customdata.start_value:,.0f}<br>' +
+                         '期末: ¥%{customdata.end_value:,.0f}<extra></extra>',
+            customdata=annual_df
+        )])
+
+        # 添加0%基准线
+        fig.add_hline(y=0, line_dash="dash", line_color="gray",
+                     annotation_text="盈亏平衡线", annotation_position="bottom right")
+
+        # 更新布局
+        fig.update_layout(
+            title={
+                'text': '年度收益率分析',
+                'x': 0.5,
+                'font': {'size': 20}
+            },
+            xaxis_title='年份',
+            yaxis_title='收益率 (%)',
+            template='plotly_white',
+            height=600,
+            showlegend=False
+        )
+
+        # 设置y轴格式
+        fig.update_yaxes(tickformat='.1f')
+
+        # 显示图表
+        pyo.plot(fig, filename='annual_returns_bar.html', auto_open=True)
 
     def get_results(self) -> Dict:
         """获取回测结果"""
