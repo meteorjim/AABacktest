@@ -1043,6 +1043,15 @@ class PortfolioBacktester:
                 close_price = self.etf_data[etf_code].loc[date, 'close']
                 if not pd.isna(close_price):
                     total_value += position['shares'] * close_price
+            else:
+                # 如果当天没有数据，使用前一个有效交易日的价格（停盘处理）
+                etf_data = self.etf_data[etf_code]
+                prior_dates = etf_data.index[etf_data.index < date]
+                if len(prior_dates) > 0:
+                    last_valid_date = prior_dates[-1]
+                    close_price = etf_data.loc[last_valid_date, 'close']
+                    if not pd.isna(close_price):
+                        total_value += position['shares'] * close_price
 
         return total_value
 
@@ -1103,8 +1112,19 @@ class PortfolioBacktester:
 
             for i, etf_code in enumerate(self.etf_codes):
                 if etf_code in self.positions and etf_code in self.etf_data:
+                    close_price = None
+
                     if date in self.etf_data[etf_code].index:
                         close_price = self.etf_data[etf_code].loc[date, 'close']
+                    else:
+                        # 如果当天没有数据，使用前一个有效交易日的价格（停盘处理）
+                        etf_data = self.etf_data[etf_code]
+                        prior_dates = etf_data.index[etf_data.index < date]
+                        if len(prior_dates) > 0:
+                            last_valid_date = prior_dates[-1]
+                            close_price = etf_data.loc[last_valid_date, 'close']
+
+                    if close_price is not None and not pd.isna(close_price):
                         shares = self.positions[etf_code]['shares']
                         value = shares * close_price
                         weight = value / total_value if total_value > 0 else 0
@@ -1446,7 +1466,7 @@ class PortfolioBacktester:
         )
 
         # 显示图表
-        pyo.plot(fig, filename='portfolio_combined_dashboard.html', auto_open=True)
+        fig.show()
 
     def _add_portfolio_value_subplot(self, fig, row, col):
         """添加账户资金变化子图"""
@@ -1855,7 +1875,7 @@ class PortfolioBacktester:
         fig.update_yaxes(tickformat=',.0f')
 
         # 显示图表
-        pyo.plot(fig, filename='portfolio_value.html', auto_open=True)
+        fig.show()
 
     def _plot_returns(self):
         """绘制收益率折线图"""
@@ -1948,7 +1968,7 @@ class PortfolioBacktester:
         fig.update_yaxes(tickformat='.1f')
 
         # 显示图表
-        pyo.plot(fig, filename='portfolio_returns.html', auto_open=True)
+        fig.show()
 
     def _plot_drawdown(self):
         """绘制回撤图"""
@@ -2032,7 +2052,7 @@ class PortfolioBacktester:
         fig.update_yaxes(tickformat='.1f')
 
         # 显示图表
-        pyo.plot(fig, filename='portfolio_drawdown.html', auto_open=True)
+        fig.show()
 
     def _plot_monthly_heatmap(self):
         """绘制月度收益率heatmap"""
@@ -2126,7 +2146,7 @@ class PortfolioBacktester:
         fig.update_xaxes(ticktext=month_names, tickvals=list(range(1, 13)))
 
         # 显示图表
-        pyo.plot(fig, filename='monthly_returns_heatmap.html', auto_open=True)
+        fig.show()
 
     def _plot_annual_returns(self):
         """绘制年度收益率柱状图"""
@@ -2221,7 +2241,7 @@ class PortfolioBacktester:
         fig.update_yaxes(tickformat='.1f')
 
         # 显示图表
-        pyo.plot(fig, filename='annual_returns_bar.html', auto_open=True)
+        fig.show()
 
     def get_results(self) -> Dict:
         """获取回测结果"""
