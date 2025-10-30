@@ -261,7 +261,8 @@ class PortfolioBacktester:
                  rebalance_threshold: float = 0.0,
                  risk_free_rate: float = 0.02,
                  force_refresh: bool = False,
-                 verbose_trading: bool = False):
+                 verbose_trading: bool = False,
+                 save_html: bool = False):
         """
         初始化回测器
 
@@ -281,6 +282,7 @@ class PortfolioBacktester:
             risk_free_rate: 无风险利率，默认3% (0.03)
             force_refresh: 是否强制刷新缓存数据，默认False
             verbose_trading: 是否显示详细的定投和再平衡交易信息，默认False
+            save_html: 是否将图表保存为HTML文件，默认False
         """
         self.etf_codes = etf_codes
         self.weights = np.array(weights)
@@ -307,6 +309,9 @@ class PortfolioBacktester:
 
         # 交易详细打印参数
         self.verbose_trading = verbose_trading
+
+        # HTML保存参数
+        self.save_html = save_html
 
         # 验证权重
         if abs(np.sum(weights) - 1.0) > 0.001:
@@ -1150,6 +1155,89 @@ class PortfolioBacktester:
         # 计算回测结果
         self._calculate_results()
 
+    def _calculate_daily_cumulative_investment(self):
+        """
+        计算每日的累计投入金额
+
+        Returns:
+            List[float]: 每日累计投入金额列表，与daily_dates对应
+        """
+        if not self.daily_dates:
+            return []
+
+        # 将定投日期转换为集合以便快速查找
+        dca_dates_set = set(self.dca_dates)
+
+        daily_investments = []
+        cumulative_investment = self.initial_capital
+
+        for date in self.daily_dates:
+            # 如果这天是定投日，增加累计投入
+            if date in dca_dates_set:
+                cumulative_investment += self.dca_amount
+
+            daily_investments.append(cumulative_investment)
+
+        return daily_investments
+
+    def _get_investment_at_dates(self, dates):
+        """
+        获取指定日期的累计投入金额
+
+        Args:
+            dates: 日期列表或单个日期
+
+        Returns:
+            List[float] or float: 对应日期的累计投入金额
+        """
+        if not self.daily_dates:
+            return [0] * len(dates) if isinstance(dates, list) else 0
+
+        daily_investments = self._calculate_daily_cumulative_investment()
+        date_to_investment = dict(zip(self.daily_dates, daily_investments))
+
+        if isinstance(dates, list):
+            return [date_to_investment.get(date, 0) for date in dates]
+        else:
+            return date_to_investment.get(dates, 0)
+
+    def _calculate_period_return(self, start_date, end_date, start_value, end_value):
+        """
+        计算特定时间段的收益率，考虑定投投入
+
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期
+            start_value: 开始时资产价值
+            end_value: 结束时资产价值
+
+        Returns:
+            float: 收益率百分比
+        """
+        # 获取开始和结束时的累计投入
+        start_investment = self._get_investment_at_dates(start_date)
+        end_investment = self._get_investment_at_dates(end_date)
+
+        # 如果没有定投，使用简单收益率计算
+        if not self.enable_dca or start_investment == end_investment:
+            if start_investment > 0:
+                return (end_value / start_investment - 1) * 100
+            else:
+                return 0
+
+        # 对于定投模式，需要考虑期间的净投入
+        net_investment = end_investment - start_investment
+        if net_investment > 0:
+            # 有定投，使用加权平均计算
+            total_invested = start_investment + net_investment
+            return (end_value / total_invested - 1) * 100
+        else:
+            # 没有定投，使用简单计算
+            if start_investment > 0:
+                return (end_value / start_investment - 1) * 100
+            else:
+                return 0
+
     def _calculate_results(self):
         """计算回测结果指标"""
         if not self.daily_values:
@@ -1468,6 +1556,12 @@ class PortfolioBacktester:
         # 显示图表
         fig.show()
 
+        # 保存为HTML文件（如果启用）
+        if self.save_html:
+            filename = f"portfolio_backtest_{self.start_date.strftime('%Y%m%d')}_to_{self.end_date.strftime('%Y%m%d')}.html"
+            fig.write_html(filename)
+            print(f"图表已保存为HTML文件: {filename}")
+
     def _add_portfolio_value_subplot(self, fig, row, col):
         """添加账户资金变化子图"""
         # 创建时间序列数据，确保正确的DatetimeIndex
@@ -1526,8 +1620,18 @@ class PortfolioBacktester:
 
     def _add_returns_subplot(self, fig, row, col):
         """添加收益率子图"""
-        total_investment = self.results['total_investment']
-        returns_data = [(value / total_investment - 1) * 100 for value in self.daily_values]
+        # 计算每日累计投入
+        daily_investments = self._calculate_daily_cumulative_investment()
+
+        # 使用每日累计投入计算收益率
+        returns_data = []
+        for value, daily_investment in zip(self.daily_values, daily_investments):
+            if daily_investment > 0:
+                return_pct = (value / daily_investment - 1) * 100
+            else:
+                return_pct = 0
+            returns_data.append(return_pct)
+
         dates = pd.to_datetime(self.daily_dates)
 
         # 主线：累计收益率
@@ -1606,13 +1710,22 @@ class PortfolioBacktester:
         monthly_data = []
         for (year, month), group in df.groupby(['year', 'month']):
             if len(group) > 1:
-                month_start = group.iloc[0]['value']
-                month_end = group.iloc[-1]['value']
-                month_return = (month_end / month_start - 1) * 100
+                start_date = group.iloc[0]['date']
+                end_date = group.iloc[-1]['date']
+                start_value = group.iloc[0]['value']
+                end_value = group.iloc[-1]['value']
+
+                # 使用新的收益率计算方法
+                month_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+
                 monthly_data.append({
                     'year': year,
                     'month': month,
-                    'return': month_return
+                    'return': month_return,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'start_value': start_value,
+                    'end_value': end_value
                 })
 
         if not monthly_data:
@@ -1670,12 +1783,21 @@ class PortfolioBacktester:
         annual_data = []
         for year, group in df.groupby('year'):
             if len(group) > 1:
-                year_start = group.iloc[0]['value']
-                year_end = group.iloc[-1]['value']
-                year_return = (year_end / year_start - 1) * 100
+                start_date = group.iloc[0]['date']
+                end_date = group.iloc[-1]['date']
+                start_value = group.iloc[0]['value']
+                end_value = group.iloc[-1]['value']
+
+                # 使用新的收益率计算方法
+                year_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+
                 annual_data.append({
                     'year': year,
-                    'return': year_return
+                    'return': year_return,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'start_value': start_value,
+                    'end_value': end_value
                 })
 
         if not annual_data:
@@ -1877,11 +1999,26 @@ class PortfolioBacktester:
         # 显示图表
         fig.show()
 
+        # 保存为HTML文件（如果启用）
+        if self.save_html:
+            filename = f"portfolio_value_{self.start_date.strftime('%Y%m%d')}_to_{self.end_date.strftime('%Y%m%d')}.html"
+            fig.write_html(filename)
+            print(f"图表已保存为HTML文件: {filename}")
+
     def _plot_returns(self):
         """绘制收益率折线图"""
         # 准备数据
-        total_investment = self.results['total_investment']
-        returns_data = [(value / total_investment - 1) * 100 for value in self.daily_values]
+        # 计算每日累计投入
+        daily_investments = self._calculate_daily_cumulative_investment()
+
+        # 使用每日累计投入计算收益率
+        returns_data = []
+        for value, daily_investment in zip(self.daily_values, daily_investments):
+            if daily_investment > 0:
+                return_pct = (value / daily_investment - 1) * 100
+            else:
+                return_pct = 0
+            returns_data.append(return_pct)
 
         df = pd.DataFrame({
             'date': self.daily_dates,
@@ -1970,6 +2107,12 @@ class PortfolioBacktester:
         # 显示图表
         fig.show()
 
+        # 保存为HTML文件（如果启用）
+        if self.save_html:
+            filename = f"returns_{self.start_date.strftime('%Y%m%d')}_to_{self.end_date.strftime('%Y%m%d')}.html"
+            fig.write_html(filename)
+            print(f"图表已保存为HTML文件: {filename}")
+
     def _plot_drawdown(self):
         """绘制回撤图"""
         # 准备数据
@@ -2054,6 +2197,12 @@ class PortfolioBacktester:
         # 显示图表
         fig.show()
 
+        # 保存为HTML文件（如果启用）
+        if self.save_html:
+            filename = f"drawdown_{self.start_date.strftime('%Y%m%d')}_to_{self.end_date.strftime('%Y%m%d')}.html"
+            fig.write_html(filename)
+            print(f"图表已保存为HTML文件: {filename}")
+
     def _plot_monthly_heatmap(self):
         """绘制月度收益率heatmap"""
         # 准备月度数据
@@ -2072,16 +2221,23 @@ class PortfolioBacktester:
 
         for (year, month), group in df.groupby(['year', 'month']):
             if len(group) > 1:
-                month_start = group.iloc[0]['value']
-                month_end = group.iloc[-1]['value']
-                month_return = (month_end / month_start - 1) * 100
+                start_date = group.iloc[0]['date']
+                end_date = group.iloc[-1]['date']
+                start_value = group.iloc[0]['value']
+                end_value = group.iloc[-1]['value']
+
+                # 使用新的收益率计算方法
+                month_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+
                 monthly_returns.append(month_return)
                 monthly_data.append({
                     'year': year,
                     'month': month,
                     'return': month_return,
-                    'start_value': month_start,
-                    'end_value': month_end
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'start_value': start_value,
+                    'end_value': end_value
                 })
 
                 # 计算各ETF在该月的贡献度
@@ -2148,6 +2304,12 @@ class PortfolioBacktester:
         # 显示图表
         fig.show()
 
+        # 保存为HTML文件（如果启用）
+        if self.save_html:
+            filename = f"monthly_heatmap_{self.start_date.strftime('%Y%m%d')}_to_{self.end_date.strftime('%Y%m%d')}.html"
+            fig.write_html(filename)
+            print(f"图表已保存为HTML文件: {filename}")
+
     def _plot_annual_returns(self):
         """绘制年度收益率柱状图"""
         # 准备年度数据
@@ -2165,15 +2327,22 @@ class PortfolioBacktester:
 
         for year, group in df.groupby('year'):
             if len(group) > 1:
-                year_start = group.iloc[0]['value']
-                year_end = group.iloc[-1]['value']
-                year_return = (year_end / year_start - 1) * 100
+                start_date = group.iloc[0]['date']
+                end_date = group.iloc[-1]['date']
+                start_value = group.iloc[0]['value']
+                end_value = group.iloc[-1]['value']
+
+                # 使用新的收益率计算方法
+                year_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+
                 annual_returns.append(year_return)
                 annual_data.append({
                     'year': year,
                     'return': year_return,
-                    'start_value': year_start,
-                    'end_value': year_end
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'start_value': start_value,
+                    'end_value': end_value
                 })
 
                 # 计算各ETF年度贡献度
@@ -2242,6 +2411,12 @@ class PortfolioBacktester:
 
         # 显示图表
         fig.show()
+
+        # 保存为HTML文件（如果启用）
+        if self.save_html:
+            filename = f"annual_returns_{self.start_date.strftime('%Y%m%d')}_to_{self.end_date.strftime('%Y%m%d')}.html"
+            fig.write_html(filename)
+            print(f"图表已保存为HTML文件: {filename}")
 
     def get_results(self) -> Dict:
         """获取回测结果"""
