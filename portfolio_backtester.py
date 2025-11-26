@@ -1201,40 +1201,56 @@ class PortfolioBacktester:
         else:
             return date_to_investment.get(dates, 0)
 
-    def _calculate_period_return(self, start_date, end_date, start_value, end_value):
+    def _calculate_period_return(self, start_date, end_date, start_value, end_value, use_period_investment=True):
         """
-        计算特定时间段的收益率，考虑定投投入
+        计算特定时间段的收益率
 
         Args:
             start_date: 开始日期
             end_date: 结束日期
             start_value: 开始时资产价值
             end_value: 结束时资产价值
+            use_period_investment: 是否使用期间累计投入计算收益率
+                                 True - 累计收益率（用于折线图）
+                                 False - 独立期间收益率（用于热力图和柱状图）
 
         Returns:
             float: 收益率百分比
         """
+
         # 获取开始和结束时的累计投入
         start_investment = self._get_investment_at_dates(start_date)
         end_investment = self._get_investment_at_dates(end_date)
 
-        # 如果没有定投，使用简单收益率计算
-        if not self.enable_dca or start_investment == end_investment:
-            if start_investment > 0:
-                return (end_value / start_investment - 1) * 100
-            else:
-                return 0
 
-        # 对于定投模式，需要考虑期间的净投入
-        net_investment = end_investment - start_investment
-        if net_investment > 0:
-            # 有定投，使用加权平均计算
-            total_invested = start_investment + net_investment
-            return (end_value / total_invested - 1) * 100
+
+        if use_period_investment:
+            # 计算累计收益率（考虑期间所有投入）
+            net_investment = end_investment - start_investment
+            if net_investment > 0:
+                # 有定投，使用加权平均计算
+                total_invested = start_investment + net_investment
+                return (end_value / total_invested - 1) * 100
+            else:
+                # 没有定投，使用简单计算
+                if start_investment > 0:
+                    return (end_value / start_investment - 1) * 100
+                else:
+                    return 0
         else:
-            # 没有定投，使用简单计算
-            if start_investment > 0:
-                return (end_value / start_investment - 1) * 100
+            # 计算独立期间收益率（考虑期初投入，排除期间定投对期末价值的影响）
+            # 这适用于热力图和年度柱状图，显示每个时期的独立收益率
+            net_investment = end_investment - start_investment
+            
+            # 如果有定投，从期末价值中减去定投金额
+            # 这样计算的是：(期末价值 - 本期投入) / 期初价值 - 1
+            adjusted_end_value = end_value
+            if net_investment > 0:
+                adjusted_end_value = end_value - net_investment
+            
+            if start_value > 0:
+
+                return (adjusted_end_value / start_value - 1) * 100
             else:
                 return 0
 
@@ -1715,17 +1731,13 @@ class PortfolioBacktester:
                 start_value = group.iloc[0]['value']
                 end_value = group.iloc[-1]['value']
 
-                # 使用新的收益率计算方法
-                month_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+                # 计算月度独立收益率
+                month_return = self._calculate_period_return(start_date, end_date, start_value, end_value, use_period_investment=False)
 
                 monthly_data.append({
                     'year': year,
                     'month': month,
-                    'return': month_return,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_value': start_value,
-                    'end_value': end_value
+                    'return': month_return
                 })
 
         if not monthly_data:
@@ -1788,16 +1800,12 @@ class PortfolioBacktester:
                 start_value = group.iloc[0]['value']
                 end_value = group.iloc[-1]['value']
 
-                # 使用新的收益率计算方法
-                year_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+                # 计算年度独立收益率
+                year_return = self._calculate_period_return(start_date, end_date, start_value, end_value, use_period_investment=False)
 
                 annual_data.append({
                     'year': year,
-                    'return': year_return,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_value': start_value,
-                    'end_value': end_value
+                    'return': year_return
                 })
 
         if not annual_data:
@@ -1829,7 +1837,7 @@ class PortfolioBacktester:
 
         # 添加关键指标汇总注释
         stats_text = f"""
-        <b>关键指标汇总</b><br>
+        <b>投资分析</b><br>
         总收益率: {self.results['total_return']:.2f}%<br>
         年化收益率: {self.results['annual_return']:.2f}%<br>
         最大回撤: {self.results['max_drawdown']:.2f}%<br>
@@ -2226,18 +2234,14 @@ class PortfolioBacktester:
                 start_value = group.iloc[0]['value']
                 end_value = group.iloc[-1]['value']
 
-                # 使用新的收益率计算方法
-                month_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+                # 计算月度独立收益率
+                month_return = self._calculate_period_return(start_date, end_date, start_value, end_value, use_period_investment=False)
 
                 monthly_returns.append(month_return)
                 monthly_data.append({
                     'year': year,
                     'month': month,
-                    'return': month_return,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_value': start_value,
-                    'end_value': end_value
+                    'return': month_return
                 })
 
                 # 计算各ETF在该月的贡献度
@@ -2332,17 +2336,13 @@ class PortfolioBacktester:
                 start_value = group.iloc[0]['value']
                 end_value = group.iloc[-1]['value']
 
-                # 使用新的收益率计算方法
-                year_return = self._calculate_period_return(start_date, end_date, start_value, end_value)
+                # 计算年度独立收益率
+                year_return = self._calculate_period_return(start_date, end_date, start_value, end_value, use_period_investment=False)
 
                 annual_returns.append(year_return)
                 annual_data.append({
                     'year': year,
-                    'return': year_return,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_value': start_value,
-                    'end_value': end_value
+                    'return': year_return
                 })
 
                 # 计算各ETF年度贡献度
