@@ -153,7 +153,7 @@ def get_price_akshare(stock: str, start_date, end_date, need_ma=True,
         # 从akshare获取历史数据
         # 方法1: 尝试获取股票数据
         try:
-            stock_df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust="qfq")
+            stock_df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust="hfq")
             if stock_df is not None and not stock_df.empty:
                 data = stock_df
                 print(f"找到了{stock} 的A股数据")
@@ -163,7 +163,7 @@ def get_price_akshare(stock: str, start_date, end_date, need_ma=True,
         # 方法2: 尝试获取ETF数据
         if data is None:
             try:
-                etf_df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust="qfq")
+                etf_df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust="hfq")
                 if etf_df is not None and not etf_df.empty:
                     data = etf_df
                     print(f"找到了{stock} 的ETF数据")
@@ -331,6 +331,7 @@ class PortfolioBacktester:
         self.transactions = []  # 交易记录
         self.dca_dates = []  # 定投日期
         self.rebalance_dates = []  # 再平衡日期
+        self.daily_flows = {}  # 每日现金流 {date: amount}
 
         # 回测结果
         self.results = {}
@@ -586,6 +587,9 @@ class PortfolioBacktester:
 
         # 添加定投资金
         self.cash += self.dca_amount
+        
+        # 记录现金流
+        self.daily_flows[date] = self.daily_flows.get(date, 0) + self.dca_amount
 
         total_dca_value = self.dca_amount
         dca_transactions = []
@@ -1267,22 +1271,53 @@ class PortfolioBacktester:
         if self.enable_dca:
             total_investment += self.dca_amount * len(self.dca_dates)
 
-        # 计算收益率
-        returns = value_series.pct_change().fillna(0)
+        # --- 修正收益率计算逻辑 (TWR) ---
+        # 1. 计算每日调整后收益率 (剔除现金流影响)
+        adjusted_returns = []
+        
+        # 第一天的收益率：(第一天价值 - 第一天现金流) / 初始资金 - 1
+        # 注意：初始建仓日通常没有额外现金流，除非第一天就定投
+        first_date = self.daily_dates[0]
+        first_flow = self.daily_flows.get(first_date, 0)
+        # 初始资金视为t=0时的价值
+        r0 = (self.daily_values[0] - first_flow) / self.initial_capital - 1
+        adjusted_returns.append(r0)
+        
+        for i in range(1, len(self.daily_values)):
+            date = self.daily_dates[i]
+            current_value = self.daily_values[i]
+            prev_value = self.daily_values[i-1]
+            flow = self.daily_flows.get(date, 0)
+            
+            # 修正后的收益率公式: (Vt - Ct) / Vt-1 - 1
+            if prev_value > 0:
+                r_t = (current_value - flow) / prev_value - 1
+            else:
+                r_t = 0
+            adjusted_returns.append(r_t)
+            
+        returns_series = pd.Series(adjusted_returns, index=self.daily_dates)
+        
+        # 2. 计算时间加权收益率 (TWR)
+        # TWR = (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
+        twr_cumulative = (1 + returns_series).cumprod()
+        total_twr = twr_cumulative.iloc[-1] - 1
+        
+        # 3. 计算投资回报率 (ROI) - 简单的总收益率
+        # ROI = (最终价值 / 总投入) - 1
+        roi = (value_series.iloc[-1] / total_investment - 1) * 100
 
-        # 总收益率（基于总投入）
-        total_return = (value_series.iloc[-1] / total_investment - 1) * 100
-
-        # 年化收益率
+        # 年化收益率 (基于TWR)
         days = (value_series.index[-1] - value_series.index[0]).days
         years = days / 365.25
         if years > 0:
-            annual_return = (value_series.iloc[-1] / total_investment) ** (1/years) - 1
+            # 使用TWR计算年化
+            annual_return = (1 + total_twr) ** (1/years) - 1
             annual_return_pct = annual_return * 100
         else:
             annual_return_pct = 0
 
-        # 最大回撤
+        # 最大回撤 (基于实际账户价值，这是投资者真实的体验)
         rolling_max = value_series.expanding().max()
         drawdown = (value_series - rolling_max) / rolling_max
         max_drawdown = drawdown.min() * 100
@@ -1319,18 +1354,18 @@ class PortfolioBacktester:
             max_drawdown_recovery_calendar_days = None
             recovery_idx = None
 
-        # 年化波动率（小数形式）
-        volatility = returns.std() * np.sqrt(252)
+        # 年化波动率 (基于调整后的每日收益率)
+        volatility = returns_series.std() * np.sqrt(252)
 
-        # 夏普比率计算
+        # 夏普比率计算 (基于调整后的年化收益率和波动率)
         sharpe_ratio = (annual_return - self.risk_free_rate) / volatility if volatility > 0 else 0
 
         self.results = {
             'initial_capital': self.initial_capital,
             'total_investment': total_investment,
             'final_value': value_series.iloc[-1],
-            'total_return': total_return,
-            'annual_return': annual_return_pct,
+            'total_return': roi,  # 使用ROI作为总收益率显示
+            'annual_return': annual_return_pct, # 使用TWR年化
             'max_drawdown': max_drawdown,
             'max_drawdown_date': max_dd_idx,
             'pre_peak_value': pre_peak_value,
