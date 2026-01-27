@@ -313,11 +313,23 @@ class PortfolioBacktester:
         # HTML保存参数
         self.save_html = save_html
 
-        # 验证权重
-        if abs(np.sum(weights) - 1.0) > 0.001:
-            raise ValueError("权重总和必须等于1")
+        # 验证权重数量匹配
         if len(etf_codes) != len(weights):
             raise ValueError("ETF代码数量与权重数量不匹配")
+
+        # 自动归一化权重（允许任意正数权重，自动转换为比例）
+        weights_array = np.array(weights)
+        total_weight = np.sum(weights_array)
+
+        if total_weight <= 0:
+            raise ValueError("权重总和必须大于0")
+
+        if abs(total_weight - 1.0) > 0.001:
+            # 权重总和不为1，自动归一化
+            self.weights = weights_array / total_weight
+            print(f"权重总和为 {total_weight:.2f}，已自动归一化为: {['%.4f' % w for w in self.weights]}")
+        else:
+            self.weights = weights_array
 
         # 初始化数据存储
         self.etf_data = {}  # ETF价格数据
