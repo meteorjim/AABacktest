@@ -262,6 +262,7 @@ class PortfolioBacktester:
                  risk_free_rate: float = 0.02,
                  force_refresh: bool = False,
                  verbose_trading: bool = False,
+                 show_daily_logs: bool = True,
                  save_html: bool = False):
         """
         初始化回测器
@@ -309,6 +310,7 @@ class PortfolioBacktester:
 
         # 交易详细打印参数
         self.verbose_trading = verbose_trading
+        self.show_daily_logs = show_daily_logs
 
         # HTML保存参数
         self.save_html = save_html
@@ -380,7 +382,8 @@ class PortfolioBacktester:
             date: 建仓日期
         """
         # 基本打印信息
-        print(f"\n在 {date.strftime('%Y-%m-%d')} 初始建仓")
+        if self.show_daily_logs:
+            print(f"\n在 {date.strftime('%Y-%m-%d')} 初始建仓")
 
         total_value = self.cash
         initial_transactions = {}
@@ -447,14 +450,14 @@ class PortfolioBacktester:
                 }
 
                 # 简单模式下只显示基本信息
-                if not self.verbose_trading:
+                if not self.verbose_trading and self.show_daily_logs:
                     print(f"  买入 {etf_code}: {shares:.2f}股 @ ¥{open_price:.3f}, 成本: ¥{cost:,.2f}")
 
         # 根据参数决定打印详细程度
-        if self.verbose_trading and initial_transactions:
+        if self.verbose_trading and initial_transactions and self.show_daily_logs:
             # 详细模式：调用详细信息打印方法
             self._print_initial_buy_details(initial_transactions)
-        else:
+        elif self.show_daily_logs:
             # 简单模式：只显示基本信息
             print(f"  建仓后现金: ¥{self.cash:,.2f}")
 
@@ -497,15 +500,15 @@ class PortfolioBacktester:
 
         return dca_dates
 
-    def _get_rebalance_dates(self, trading_dates: List[pd.Timestamp]) -> List[pd.Timestamp]:
+    def _get_time_rebalance_dates(self, trading_dates: List[pd.Timestamp]) -> List[pd.Timestamp]:
         """
-        计算再平衡日期
+        计算基于时间的再平衡日期
 
         Args:
             trading_dates: 所有交易日列表
 
         Returns:
-            List[pd.Timestamp]: 再平衡日期列表
+            List[pd.Timestamp]:基于时间的再平衡日期列表
         """
         if not self.enable_rebalancing:
             return []
@@ -544,11 +547,8 @@ class PortfolioBacktester:
                 if date == year_dates[-1]:
                     time_rebalance = True
 
-            # 阈值触发再平衡
-            threshold_rebalance = self._check_rebalance_threshold(date)
-
-            # 如果满足任一条件，则进行再平衡
-            if time_rebalance or threshold_rebalance:
+            # 如果满足时间条件，则进行再平衡
+            if time_rebalance:
                 rebalance_dates.append(date)
 
         return rebalance_dates
@@ -595,7 +595,8 @@ class PortfolioBacktester:
             date: 定投日期
         """
         # 基本打印信息
-        print(f"\n定投 {date.strftime('%Y-%m-%d')}: 投入 ¥{self.dca_amount:,.2f}")
+        if self.show_daily_logs:
+            print(f"\n定投 {date.strftime('%Y-%m-%d')}: 投入 ¥{self.dca_amount:,.2f}")
 
         # 添加定投资金
         self.cash += self.dca_amount
@@ -671,14 +672,14 @@ class PortfolioBacktester:
                 dca_transactions.append(transaction)
 
                 # 简单模式下只显示基本信息
-                if not self.verbose_trading:
+                if not self.verbose_trading and self.show_daily_logs:
                     print(f"  买入 {etf_code}: {shares:.4f}股 @ ¥{close_price:.3f}, 成本: ¥{cost:,.2f}")
 
         # 根据参数决定打印详细程度
-        if self.verbose_trading and dca_transactions:
+        if self.verbose_trading and dca_transactions and self.show_daily_logs:
             # 详细模式：调用详细信息打印方法
             self._print_dca_details(date, dca_transactions)
-        else:
+        elif self.show_daily_logs:
             # 简单模式：只显示基本信息
             print(f"  定投后现金: ¥{self.cash:,.2f}")
 
@@ -750,13 +751,13 @@ class PortfolioBacktester:
             return
 
         # 基本打印信息
-        if not self.verbose_trading:
+        if not self.verbose_trading and self.show_daily_logs:
             print(f"\n再平衡 {date.strftime('%Y-%m-%d')}: 总资产价值: ¥{total_assets:,.0f}")
-        else:
+        elif self.verbose_trading and self.show_daily_logs:
             print(f"\n再平衡 {date.strftime('%Y-%m-%d')}:")
 
         # 简单模式下的基本信息
-        if self.verbose_trading:
+        if self.verbose_trading and self.show_daily_logs:
             print(f"  总资产价值: ¥{total_assets:,.0f}")
 
         # 计算每个ETF的目标配置和当前配置的差额
@@ -798,6 +799,10 @@ class PortfolioBacktester:
         total_sell_proceeds = 0
         total_buy_cost = 0
         has_trades = False
+        
+        # 记录简单的买卖信息 (Ticker, Amount)
+        sell_summary = []
+        buy_summary = []
 
         # 第一阶段：执行所有卖出操作
         for etf_code, plan in rebalance_plan.items():
@@ -827,6 +832,8 @@ class PortfolioBacktester:
 
                     self.cash += sell_proceeds
                     total_sell_proceeds += sell_proceeds
+                    
+                    sell_summary.append(f"{etf_code}(¥{sell_proceeds/1000:.1f}k)")
 
                     # 记录交易
                     self.transactions.append({
@@ -840,7 +847,7 @@ class PortfolioBacktester:
                     })
 
                     # 详细模式下显示基本交易信息
-                    if self.verbose_trading:
+                    if self.verbose_trading and self.show_daily_logs:
                         print(f"  卖出 {etf_code}: {shares_to_sell:.2f}股 @ ¥{plan['price']:.3f}, 收入: ¥{sell_proceeds:,.0f}")
 
         # 第二阶段：执行所有买入操作
@@ -878,6 +885,8 @@ class PortfolioBacktester:
                     self.cash -= cost
                     available_cash -= cost
                     total_buy_cost += cost
+                    
+                    buy_summary.append(f"{etf_code}(¥{cost/1000:.1f}k)")
 
                     # 记录交易
                     self.transactions.append({
@@ -891,18 +900,24 @@ class PortfolioBacktester:
                     })
 
                     # 详细模式下显示基本交易信息
-                    if self.verbose_trading:
+                    if self.verbose_trading and self.show_daily_logs:
                         print(f"  买入 {etf_code}: {shares_to_buy:.2f}股 @ ¥{plan['price']:.3f}, 成本: ¥{cost:,.0f}")
 
         # 根据参数决定打印详细程度
+        if not self.show_daily_logs:
+            return
+
         if self.verbose_trading and has_trades:
             # 详细模式：调用详细信息打印方法
             self._print_rebalance_details(date, total_assets, rebalance_plan,
                                          total_buy_needed, total_sell_needed,
                                          total_sell_proceeds, total_buy_cost)
         elif has_trades:
-            # 简单模式：只显示汇总信息
-            print(f"  交易汇总: 卖出¥{total_sell_proceeds:,.0f}, 买入¥{total_buy_cost:,.0f}, 再平衡后: ¥{self._calculate_portfolio_value(date):,.0f}")
+            # 简单模式：显示带有标的的汇总信息
+            sell_str = ", ".join(sell_summary) if sell_summary else "无"
+            buy_str = ", ".join(buy_summary) if buy_summary else "无"
+            
+            print(f"  交易汇总: 卖出[{sell_str}] 共¥{total_sell_proceeds:,.0f}, 买入[{buy_str}] 共¥{total_buy_cost:,.0f}, 再平衡后: ¥{self._calculate_portfolio_value(date):,.0f}")
         elif not self.verbose_trading:
             print("  无需调整")
 
@@ -1108,7 +1123,8 @@ class PortfolioBacktester:
         self.dca_dates = self._get_dca_dates(trading_dates)
 
         # 计算再平衡日期
-        self.rebalance_dates = self._get_rebalance_dates(trading_dates)
+        # 计算再平衡日期
+        self.rebalance_dates = self._get_time_rebalance_dates(trading_dates)
 
         # 第一天初始建仓
         if trading_dates:
@@ -1116,8 +1132,25 @@ class PortfolioBacktester:
 
         # 逐日更新 - 采用先平衡后定投策略
         for i, date in enumerate(trading_dates):
-            # 先执行再平衡：调整现有组合到目标权重
+            # 检查是否需要再平衡（时间触发 或 阈值触发）
+            should_rebalance = False
+            
+            # 1. 检查是否是预定的时间再平衡日
             if date in self.rebalance_dates:
+                should_rebalance = True
+            
+            # 2. 检查是否触发阈值 (且今天不是已经要再平衡的日子)
+            elif self.enable_rebalancing and self.rebalance_threshold > 0:
+                if self._check_rebalance_threshold(date):
+                    should_rebalance = True
+                    # 将这个额外的再平衡日期加入列表，以便统计
+                    if date not in self.rebalance_dates:
+                        self.rebalance_dates.append(date)
+                        # 为了保持有序
+                        self.rebalance_dates.sort()
+
+            # 先执行再平衡：调整现有组合到目标权重
+            if should_rebalance:
                 self._rebalance_portfolio(date)
 
             # 后执行定投：将新资金按目标权重投入

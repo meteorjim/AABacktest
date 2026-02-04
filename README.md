@@ -56,7 +56,9 @@ backtester = PortfolioBacktester(
     start_date='2015-01-01',
     end_date='2023-12-31',
     initial_capital=100000,
-    transaction_cost=0.001,                                # 0.1%交易成本
+    transaction_cost=0.001,                               # 0.1%交易成本
+    rebalance_threshold=0.01,                             # 1%阈值触发再平衡（新功能）
+    show_daily_logs=True,                                 # 显示每日交易日志（新功能）
     verbose_trading=False                                 # 简单模式
 )
 
@@ -104,6 +106,8 @@ backtester_verbose = PortfolioBacktester(
     start_date='2020-01-01',
     end_date='2023-12-31',
     initial_capital=50000,
+    initial_capital=50000,
+    show_daily_logs=True,                                 # 显示日志
     verbose_trading=True                                  # 详细模式
 )
 
@@ -130,7 +134,7 @@ backtester_verbose.generate_report()
 |------|------|--------|------|
 | `enable_rebalancing` | `bool` | False | 是否启用再平衡 |
 | `rebalance_freq` | `str` | 'quarterly' | 再平衡频率：'monthly', 'quarterly', 'yearly' |
-| `rebalance_threshold` | `float` | 0.0 | 再平衡触发阈值（权重偏离超过此值时触发） |
+| `rebalance_threshold` | `float` | 0.0 | 再平衡触发阈值（权重偏离超过此值时强制触发，如0.01=1%） |
 
 ### 定投参数
 
@@ -146,7 +150,8 @@ backtester_verbose.generate_report()
 |------|------|--------|------|
 | `risk_free_rate` | `float` | 0.02 | 无风险利率（用于计算夏普比率） |
 | `force_refresh` | `bool` | False | 是否强制刷新缓存数据 |
-| `verbose_trading` | `bool` | False | 是否显示详细的交易信息 |
+| `verbose_trading` | `bool` | False | 是否显示详细的交易信息（为False时显示简略汇总） |
+| `show_daily_logs` | `bool` | True | 是否显示每日交易/再平衡日志开关 |
 
 ## 📊 支持的ETF代码
 
@@ -250,7 +255,7 @@ backtester = PortfolioBacktester(
     weights=[0.25, 0.25, 0.25, 0.25],
     enable_rebalancing=True,
     rebalance_freq='yearly',          # 定期再平衡
-    rebalance_threshold=0.05,          # 阈值触发再平衡
+    rebalance_threshold=0.05,         # 阈值触发：偏离5%强制再平衡
     start_date='2018-01-01',
     end_date='2023-12-31'
 )
@@ -269,6 +274,16 @@ backtester_simple = PortfolioBacktester(
 backtester_detail = PortfolioBacktester(
     # ... 其他参数
     verbose_trading=True
+)
+```
+
+### 日志显示控制
+
+```python
+# 静默模式 - 只显示最终报告，不刷屏
+backtester_silent = PortfolioBacktester(
+    # ... 其他参数
+    show_daily_logs=False
 )
 ```
 
@@ -332,6 +347,13 @@ AABacktest/
 ```
 
 ## 📝 更新日志
+
+### v2.1.0 (最新)
+- ✅ 新增**阈值再平衡**功能：即使未到定期平衡日，当权重偏离超过设定阈值（`rebalance_threshold`）时也会强制平衡
+- ✅ 优化**交易日志**：
+  - 简单模式日志现在显示具体的买卖标的和金额（如 `卖出[510300(¥5k)]`）
+  - 新增 `show_daily_logs` 开关，可选择关闭每日刷屏日志，仅看结果
+- ✅ 更新文档和示例代码
 
 ### v2.0.0
 - ✅ 新增定投策略支持（DCA）
