@@ -13,22 +13,17 @@ from portfolio_backtester import PortfolioBacktester
 if __name__ == "__main__":
 
     backtester = PortfolioBacktester(
-        # weights=  [0.28,       0.28,      0.14,      0.30],
-        # etf_codes=['601288', '601398', '601939', '601988'],
-        # weights=  [0.25,       0.25,      0.25,      0.25],
-        # etf_codes=['518880', '513100'],
-        # weights=  [0.3,       0.7,      ],
-        # etf_codes=['159915'],
-        # weights=[1],
         # --- 核心资产配置 ---
-        # 国债.     红利.     黄金.     纳斯达克.
+        #           国债.     红利.     黄金.     纳斯达克.
+        # etf_codes=['000012', '000015', 'AU8888', 'QQQ'],   # ETF代码列表：输入你要回测的ETF/股票代码
+        # weights=  [20,       20,      20,      20],         # 目标权重：对应上述代码的配置比例(会自动归一化)
         etf_codes=['511010', '510880', '518880', '513100'],   # ETF代码列表：输入你要回测的ETF/股票代码
         weights=  [20,       20,      20,      20],         # 目标权重：对应上述代码的配置比例(会自动归一化)
-
+ 
         # --- 再平衡策略 ---
         enable_rebalancing=True,          # 是否启用自动再平衡：True=开启, False=关闭
         rebalance_freq='yearly',          # 再平衡频率：'monthly'(月度), 'quarterly'(季度), 'yearly'(年度)
-        # rebalance_threshold=0.01,         # 阈值再平衡：当任一资产权重偏离目标超过此值(如0.01=1%)时，强制触发再平衡
+        # rebalance_threshold=0.03,         # 阈值再平衡：当任一资产权重偏离目标超过此值(如0.01=1%)时，强制触发再平衡
 
         # --- 回测时间与资金 ---
         start_date='2014-01-01',          # 回测开始日期 'YYYY-MM-DD'
@@ -36,7 +31,7 @@ if __name__ == "__main__":
         initial_capital=100000,           # 初始投入资金(元)
         transaction_cost=0,               # 交易费率：单边买/卖手续费率 (如 0.0001 = 万分之一)
         risk_free_rate=0.02,              # 无风险利率：用于计算夏普比率 (0.02 = 2%)
-        
+
         # --- 定投策略 (DCA) ---
         enable_dca = True,                # 是否开启定投：True=开启, False=关闭
         dca_amount = 100000,              # 每次定投金额(元)
@@ -53,4 +48,4 @@ if __name__ == "__main__":
     backtester.run_backtest()
 
     # 生成完整报告
-    backtester.generate_report(show_plot=False)
+    backtester.generate_report(show_plot=True)

@@ -1362,27 +1362,35 @@ class PortfolioBacktester:
         else:
             annual_return_pct = 0
 
-        # 最大回撤 (基于实际账户价值，这是投资者真实的体验)
-        rolling_max = value_series.expanding().max()
-        drawdown = (value_series - rolling_max) / rolling_max
-        max_drawdown = drawdown.min() * 100
+        # 最大回撤计算 - 基于 TWR（时间加权收益率），完全排除入金影响
+        # TWR 已经剔除了现金流影响，反映的是纯粹的投资收益率
+        # 将 TWR 转换为百分比形式便于理解
+        twr_pct = (twr_cumulative - 1) * 100  # 转为百分比
+
+        # 计算 TWR 的回撤
+        rolling_max_twr = twr_pct.expanding().max()
+        twr_drawdown = twr_pct - rolling_max_twr  # TWR 回撤（百分点，负数）
+        max_drawdown = twr_drawdown.min()  # 最大回撤（负数，百分点）
 
         # 计算最大回撤回补周期
-        max_dd_idx = drawdown.idxmin()  # 最大回撤发生的日期
-        max_dd_value = drawdown.min()    # 最大回撤深度
+        max_dd_idx = twr_drawdown.idxmin()  # 最大回撤发生的日期
+        max_dd_value = twr_drawdown.min()    # 最大回撤深度
 
-        # 找到对应的滚动最高点（前期高点）
-        pre_peak_value = rolling_max.loc[max_dd_idx]
+        # 找到对应的滚动最高点（前期最高 TWR）
+        pre_peak_twr = rolling_max_twr.loc[max_dd_idx]
 
-        # 从最大回撤点开始，找到首次超过前期高点的日期
+        # 从最大回撤点开始，找到首次回补的日期
+        # 回补 = TWR 恢复到前期最高点（完全排除入金影响，纯粹看投资收益恢复）
         recovery_idx = None
         recovery_date = None
 
-        # 检查最大回撤之后的所有日期
-        after_max_dd = value_series.loc[max_dd_idx:]
+        # 检查最大回撤之后的所有日期的 TWR
+        after_max_dd_twr = twr_pct.loc[max_dd_idx:]
 
-        for date, value in after_max_dd.items():
-            if value >= pre_peak_value:
+        for date, current_twr in after_max_dd_twr.items():
+            # 当前 TWR >= 前期最高 TWR，表示投资收益已恢复
+            # 使用一个很小的阈值来处理浮点数精度问题
+            if current_twr >= pre_peak_twr - 0.01:  # 允许0.01%的误差
                 recovery_idx = date
                 recovery_date = date
                 break
@@ -1398,6 +1406,11 @@ class PortfolioBacktester:
             max_drawdown_recovery_days = None
             max_drawdown_recovery_calendar_days = None
             recovery_idx = None
+
+        # 保留原来的变量用于其他计算（兼容性）
+        rolling_max = value_series.expanding().max()
+        drawdown = (value_series - rolling_max) / rolling_max
+        pre_peak_value = rolling_max.loc[max_dd_idx]
 
         # 年化波动率 (基于调整后的每日收益率)
         volatility = returns_series.std() * np.sqrt(252)
