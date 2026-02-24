@@ -121,20 +121,7 @@ def fetch_seeking_alpha_to_csv(
 # ==================== Cookies 配置 ====================
 # 建议把 cookies 保存到单独的文件或环境变量中
 COOKIES = [
-    {"name": "machine_cookie", "value": "fut6k0w81z1770628833"},
-    {"name": "_pxvid", "value": "9895aff5-0598-11f1-a7db-790042ff016f"},
-    {"name": "sa-user-id", "value": "s%253A0-72836011-761e-4716-5a68-fa2200345b39.W9jbnO1p3XPzx3sHiKji1PxU%252B7R9M3FgfST8%252F%252BaLK20"},
-    {"name": "sa-user-id-v3", "value": "s%253AAQAKIJoEwKqmb5CaNAG2rL7umCfwHC12UoVAuYCvT9zsqyG8EJIFGAIgwoyzwwY6BDPk3LlCBDZMlCw.4zOcgwDvGABG3YqIZpCQA1hf6EANF2w4IXTaDhHeSus"},
-    {"name": "user_id", "value": "64133903"},
-    {"name": "sapu", "value": "101"},
-    {"name": "user_remember_token", "value": "8541f2a9328126c3bf13895952689a587df9b077"},
-    {"name": "sailthru_hid", "value": "bc9142dbae748dfbd91b7c215a43b4e96989a7060d8b92a64601ff9afca81d6159f96e63d104ec1000cddbcf"},
-    {"name": "_px3", "value": "8e237db9a6372a9a9ce56898c034173953420ebc3d1ed8d2604e91f72a41d36b:2kUVB/THV4h2KlK4q/uv1j95fr/A0SdN5nDoFDWFpff6yELMY6tjpp/2JbW6rPyU99j/BxvsAy4BCZp/ES/FMA==:1000:tKTuQ1c51BhHhhWU1+i0MdkkoN/CNTPr63ZR+QQCybn/Xi1HBu5LmtOuHlLyQh0rIgCE5GQaujb7LRZtwL1p+mw1cnPECPEYZ60zFcW4og7fNJD9v8HmDuVAlCM8uBUln41eZzITFo4aFRdzDXdykD0ERkKGHSDqE2FE6FkXIV0RuQSR/9Ygl13v/HeyEzMNID1UlHybK88o+viyI75OZD65LDqTVx0AgVKktz2OgkjryrNa7letZhkyA2qv8z8Qb8ZR/DdODFOMgvtZlUkLsJ+Aiemo0nVVEA2I9gg9hrv/1giiKUSzWNNNO15ke0ikagYGCljGHTzZd9RKKYLhUMEA2DwaLwwdpYK22ctVgF9noBxvuvez6OYziXyZIPW7Wc5y+z3L5q4il3jE2MuyU03bi2NuGMCcnS0t/4SlAVMhRqipvosFVWsrQQrBg87kqxKQeTvE6L+xap7pf4rtWM+O4eNMnWgYabmlsY9aS6f+6wi1lM2n2kzPtQcLmwLqOi/2dZGVLwiFzDxk+Oe2QaK4Fi2MBVRVGe2qwrZ5hGCjVD+P28/V3uISF03pf5aL53Ugz4CsLuwcLDHnndYUXg=="},
-    {"name": "user_cookie_key", "value": "9bb7hi"},
-    {"name": "gk_user_access", "value": "1**1771896938"},
-    {"name": "gk_user_access_sign", "value": "0b6c6077ee0f74d877d68c01398876decaadc192"},
-    {"name": "_ga", "value": "GA1.1.1514771253.1770628857"},
-    {"name": "_ga_KGRFF2R2C5", "value": "GS2.1.s1771896940$o2$g0$t1771896940$j60$l0$h0"},
+
 ]
 
 
