@@ -3,7 +3,7 @@
 This document is designed to help AI agents quickly understand the **AABacktest** project structure, core logic, and intended usage patterns.
 
 ## 1. Project Overview
-**AABacktest** is a Python-based Asset Allocation Backtesting framework. It simulates the performance of an ETF portfolio over time with features like **Periodic Rebalancing**, **Threshold Rebalancing**, and **Dollar-Cost Averaging (DCA)**.
+**AABacktest** is a Python-based Asset Allocation Backtesting framework. It simulates the performance of an ETF portfolio over time with features like **Periodic Rebalancing**, **Threshold Rebalancing**, **Dollar-Cost Averaging (DCA)**, and **Synthetic Dividend Yields**.
 
 ### Tech Stack
 -   **Language**: Python 3.12+
@@ -33,12 +33,13 @@ The `PortfolioBacktester` class orchestrates the entire lifecycle.
     -   `verbose_trading` (bool): Detailed transaction logs.
     -   `show_daily_logs` (bool): Daily output switch.
 
-### 3.2 Data Loading (`_load_data`)
+### 3.2 Data Loading (`fetch_data`)
 -   Iterates through `self.etf_codes`.
+-   **Synthetic Dividend Parsing**: Detects if an `@yield` suffix is present (e.g., `000015@0.05`). Strips the suffix for fetch logic.
 -   Checks `data/` for valid cached CSVs.
 -   If missing/stale/forced: Calls `ak.fund_etf_hist_em` via `get_price_akshare`.
--   Aligns all data to a common date index (intersection of timestamps).
--   Normalizes data (handles splits/adjustments via AKShare's "qfq").
+-   **Synthetic Dividend Processing**: Converts the parsed annual yield into a daily compounded factor, mutating the trailing DataFrame `open`, `close`, `high`, `low` rows.
+-   Calculates the full simulated dataset, storing it with the original suffix-appended string key for consistent tracking.
 
 ### 3.3 Simulation Loop (`run_backtest`)
 The heart of the simulation.
@@ -50,15 +51,16 @@ The heart of the simulation.
     -   **Rebalance Check**:
         -   Is it a `time_rebalance_date`? -> Yes, Rebalance.
         -   Is `rebalance_threshold` > 0 AND `_check_rebalance_threshold(date)` is True? -> Yes, Rebalance (Dynamic).
-        -   *Action*: `_rebalance_portfolio(date)` targets original `self.weights`.
+        -   *Action*: `_rebalance_portfolio(date)` targets original `self.weights`. Both valuation target mapping and actual execution are rigorously pinned to `close` prices. To prevent cash stranding during cross-market holiday misalignments (e.g. A-shares closed but US-shares open), the system implements a **Past-Date Fallback Engine**. If a future price does not exist, it falls back to the most recent historical `close` price, ensuring 100% capital deployment (0% cash drag).
     -   **DCA Check**:
-        -   Is it a `dca_date`? -> Yes, `_dca_buy(date)`.
+        -   Is it a `dca_date`? -> Yes, `_dca_buy(date)`. Uses the same `close` price synchronization and fallback logic.
     -   **Position Update**:
         -   Updates daily market value based on `close` prices.
         -   Records state to `self.daily_positions` and `self.daily_values`.
 
-### 3.4 Reporting (`generate_report`)
+### 3.4 Reporting (`_calculate_results` & `generate_report`)
 -   Calculates metrics: Total Return, CAGR, Max Drawdown, Sharpe Ratio, Volatility.
+-   **Max Drawdown Details**: Strict conversion from TWR (Time-Weighted Return) index logic instead of absolute variations, protecting the curve against DCA value spikes.
 -   Generates Plotly HTML:
     -   Portfolio Value Curve
     -   Drawdown Curve

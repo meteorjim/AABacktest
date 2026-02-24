@@ -353,8 +353,20 @@ class PortfolioBacktester:
     def fetch_data(self) -> Dict[str, pd.DataFrame]:
         """获取所有ETF的价格数据"""
         for etf_code in self.etf_codes:
+            # 解析可能的合成全收益指数参数：如 '000015@0.05'
+            base_code = etf_code
+            annual_yield = 0.0
+            if '@' in etf_code:
+                parts = etf_code.split('@')
+                base_code = parts[0]
+                try:
+                    annual_yield = float(parts[1])
+                except ValueError:
+                    print(f"警告: {etf_code} 包含无法解析的分红率，将按 0 处理")
+
+            # 使用基础代码获取历史数据
             data = get_price_akshare(
-                stock=etf_code,
+                stock=base_code,
                 start_date=self.start_date,
                 end_date=self.end_date,
                 need_ma=False,
@@ -364,9 +376,25 @@ class PortfolioBacktester:
             )
 
             if data.empty:
-                print(f"警告: {etf_code} 没有获取到数据")
+                print(f"警告: {base_code} (原始输入: {etf_code}) 没有获取到数据")
                 continue
 
+            # 注入外挂累积复利分红收益
+            if annual_yield > 0 and len(data) > 0:
+                # 假设一年 252 个交易日，将年化分红转为日度复利
+                daily_yield = (1 + annual_yield) ** (1/252) - 1
+                # 构建随着交易日累加的复利因子序列，第一天为 1
+                compounding_factors = (1 + daily_yield) ** np.arange(len(data))
+                
+                # 确保不会警告
+                data = data.copy()
+                
+                # 调整价格列
+                for col in ['open', 'close', 'high', 'low']:
+                    if col in data.columns:
+                        data[col] = data[col] * compounding_factors
+
+            # 存储回 self.etf_data，使用原始完整输入字符串作为键名以供其他模块一致性检索
             self.etf_data[etf_code] = data
 
         if not self.etf_data:
@@ -393,17 +421,18 @@ class PortfolioBacktester:
                 continue
 
             # 获取当天的开盘价
-            if date not in self.etf_data[etf_code].index:
+            buy_date = date
+            if buy_date not in self.etf_data[etf_code].index:
                 # 如果当天没有数据，找最近的下一个交易日
-                future_dates = self.etf_data[etf_code].index[self.etf_data[etf_code].index >= date]
+                future_dates = self.etf_data[etf_code].index[self.etf_data[etf_code].index >= buy_date]
                 if len(future_dates) > 0:
-                    date = future_dates[0]
+                    buy_date = future_dates[0]
                 else:
                     if not self.verbose_trading:
-                        print(f"  {etf_code}: 在 {date} 后没有交易数据，跳过")
+                        print(f"  {etf_code}: 在 {buy_date.strftime('%Y-%m-%d')} 后没有交易数据，跳过")
                     continue
 
-            open_price = self.etf_data[etf_code].loc[date, 'open']
+            open_price = self.etf_data[etf_code].loc[buy_date, 'open']
 
             if pd.isna(open_price):
                 if not self.verbose_trading:
@@ -611,17 +640,22 @@ class PortfolioBacktester:
             if etf_code not in self.etf_data:
                 continue
 
-            # 获取当天的收盘价
-            if date not in self.etf_data[etf_code].index:
-                if not self.verbose_trading:
-                    print(f"  {etf_code}: 当天无交易数据，跳过")
-                continue
+            # 获取收盘价，如果当天没有，则顺延到未来最近一个有数据的交易日买入
+            buy_date = date
+            if buy_date not in self.etf_data[etf_code].index:
+                future_dates = self.etf_data[etf_code].index[self.etf_data[etf_code].index >= buy_date]
+                if len(future_dates) > 0:
+                    buy_date = future_dates[0]
+                else:
+                    if not self.verbose_trading:
+                        print(f"  {etf_code}: 在 {buy_date.strftime('%Y-%m-%d')} 及之后无交易数据，定投资金跳过")
+                    continue
 
-            close_price = self.etf_data[etf_code].loc[date, 'close']
+            close_price = self.etf_data[etf_code].loc[buy_date, 'close']
 
             if pd.isna(close_price):
                 if not self.verbose_trading:
-                    print(f"  {etf_code}: 收盘价数据缺失，跳过")
+                    print(f"  {etf_code}: 找到 {buy_date.strftime('%Y-%m-%d')} 但是收盘价缺失，定投跳过")
                 continue
 
             # 计算该ETF应分配的资金
@@ -765,29 +799,56 @@ class PortfolioBacktester:
         total_sell_needed = 0
         total_buy_needed = 0
 
+        # 第一遍遍历：获取所有ETF在实际将要执行交易日的价格，并计算真实的同期总资产
+        true_total_assets = self.cash
+        etf_execution_data = {}
+
         for i, etf_code in enumerate(self.etf_codes):
-            if etf_code not in self.etf_data or date not in self.etf_data[etf_code].index:
+            if etf_code not in self.etf_data:
                 continue
+                
+            trade_date = date
+            if trade_date not in self.etf_data[etf_code].index:
+                # 优先查未来的交易日（例如节假日顺延）
+                future_dates = self.etf_data[etf_code].index[self.etf_data[etf_code].index >= trade_date]
+                if len(future_dates) > 0:
+                    trade_date = future_dates[0]
+                else:
+                    # 如果未来没有交易日（例如数据只更新到上周，但回测还在继续）
+                    # 则退回寻找历史上最近的一个有效交易日
+                    past_dates = self.etf_data[etf_code].index[self.etf_data[etf_code].index < trade_date]
+                    if len(past_dates) > 0:
+                        trade_date = past_dates[-1]
+                    else:
+                        continue
 
-            current_price = self.etf_data[etf_code].loc[date, 'close']
-            target_value = total_assets * self.weights[i]
-
-            # 获取当前持仓
+            current_price = self.etf_data[etf_code].loc[trade_date, 'close']
+            
             current_shares = 0
-            current_value = 0
             if etf_code in self.positions:
                 current_shares = self.positions[etf_code]['shares']
-                current_value = current_shares * current_price
+                
+            current_value = current_shares * current_price
+            true_total_assets += current_value
+            
+            etf_execution_data[etf_code] = {
+                'index': i,
+                'price': current_price,
+                'shares': current_shares,
+                'value': current_value
+            }
 
-            # 计算需要调整的金额
-            adjust_value = target_value - current_value
+        # 第二遍遍历：根据真实的同频资产总值计算各项的调整目标
+        for etf_code, exec_data in etf_execution_data.items():
+            target_value = true_total_assets * self.weights[exec_data['index']]
+            adjust_value = target_value - exec_data['value']
 
             rebalance_plan[etf_code] = {
-                'current_shares': current_shares,
-                'current_value': current_value,
+                'current_shares': exec_data['shares'],
+                'current_value': exec_data['value'],
                 'target_value': target_value,
                 'adjust_value': adjust_value,
-                'price': current_price
+                'price': exec_data['price']
             }
 
             if adjust_value > 0:
@@ -1074,11 +1135,10 @@ class PortfolioBacktester:
             if etf_code not in self.etf_data:
                 continue
 
+            close_price = None
             # 获取当天的收盘价
             if date in self.etf_data[etf_code].index:
                 close_price = self.etf_data[etf_code].loc[date, 'close']
-                if not pd.isna(close_price):
-                    total_value += position['shares'] * close_price
             else:
                 # 如果当天没有数据，使用前一个有效交易日的价格（停盘处理）
                 etf_data = self.etf_data[etf_code]
@@ -1086,8 +1146,12 @@ class PortfolioBacktester:
                 if len(prior_dates) > 0:
                     last_valid_date = prior_dates[-1]
                     close_price = etf_data.loc[last_valid_date, 'close']
-                    if not pd.isna(close_price):
-                        total_value += position['shares'] * close_price
+
+            if close_price is not None and not pd.isna(close_price):
+                total_value += position['shares'] * close_price
+            else:
+                # 兜底逻辑：无此前价格（如刚建仓但无当日数据时），回退按平均成本估值
+                total_value += position['shares'] * position['avg_cost']
 
         return total_value
 
@@ -1182,13 +1246,19 @@ class PortfolioBacktester:
                         shares = self.positions[etf_code]['shares']
                         value = shares * close_price
                         weight = value / total_value if total_value > 0 else 0
+                        price_to_record = close_price
+                    else:
+                        shares = self.positions[etf_code]['shares']
+                        value = shares * self.positions[etf_code]['avg_cost']
+                        weight = value / total_value if total_value > 0 else 0
+                        price_to_record = self.positions[etf_code]['avg_cost']
 
-                        daily_position_detail[etf_code] = {
-                            'shares': shares,
-                            'value': value,
-                            'weight': weight,
-                            'price': close_price
-                        }
+                    daily_position_detail[etf_code] = {
+                        'shares': shares,
+                        'value': value,
+                        'weight': weight,
+                        'price': price_to_record
+                    }
 
             # 添加现金信息
             daily_position_detail['cash'] = {
@@ -1364,20 +1434,20 @@ class PortfolioBacktester:
 
         # 最大回撤计算 - 基于 TWR（时间加权收益率），完全排除入金影响
         # TWR 已经剔除了现金流影响，反映的是纯粹的投资收益率
-        # 将 TWR 转换为百分比形式便于理解
-        twr_pct = (twr_cumulative - 1) * 100  # 转为百分比
+        # 基于 TWR 的财富指数计算真实回撤
+        rolling_max_twr_index = twr_cumulative.expanding().max()
+        twr_drawdown = (twr_cumulative - rolling_max_twr_index) / rolling_max_twr_index * 100 # 回撤百分比（负数）
+        max_drawdown = twr_drawdown.min()  # 最大回撤
 
-        # 计算 TWR 的回撤
-        rolling_max_twr = twr_pct.expanding().max()
-        twr_drawdown = twr_pct - rolling_max_twr  # TWR 回撤（百分点，负数）
-        max_drawdown = twr_drawdown.min()  # 最大回撤（负数，百分点）
+        # 将正确的回撤序列保存在实例中供绘图时复用
+        self.twr_drawdown_series = twr_drawdown
 
         # 计算最大回撤回补周期
         max_dd_idx = twr_drawdown.idxmin()  # 最大回撤发生的日期
         max_dd_value = twr_drawdown.min()    # 最大回撤深度
 
-        # 找到对应的滚动最高点（前期最高 TWR）
-        pre_peak_twr = rolling_max_twr.loc[max_dd_idx]
+        # 找到对应的滚动最高点（前期最高 TWR Index）
+        pre_peak_twr_index = rolling_max_twr_index.loc[max_dd_idx]
 
         # 从最大回撤点开始，找到首次回补的日期
         # 回补 = TWR 恢复到前期最高点（完全排除入金影响，纯粹看投资收益恢复）
@@ -1385,12 +1455,12 @@ class PortfolioBacktester:
         recovery_date = None
 
         # 检查最大回撤之后的所有日期的 TWR
-        after_max_dd_twr = twr_pct.loc[max_dd_idx:]
+        after_max_dd_twr = twr_cumulative.loc[max_dd_idx:]
 
         for date, current_twr in after_max_dd_twr.items():
-            # 当前 TWR >= 前期最高 TWR，表示投资收益已恢复
-            # 使用一个很小的阈值来处理浮点数精度问题
-            if current_twr >= pre_peak_twr - 0.01:  # 允许0.01%的误差
+            # 当前 TWR >= 前期最高 TWR Index，表示投资收益已恢复
+            # 使用极小的阈值来处理浮点数精度微弱的误差
+            if current_twr >= pre_peak_twr_index - 0.0001:  
                 recovery_idx = date
                 recovery_date = date
                 break
@@ -1409,7 +1479,6 @@ class PortfolioBacktester:
 
         # 保留原来的变量用于其他计算（兼容性）
         rolling_max = value_series.expanding().max()
-        drawdown = (value_series - rolling_max) / rolling_max
         pre_peak_value = rolling_max.loc[max_dd_idx]
 
         # 年化波动率 (基于调整后的每日收益率)
@@ -1480,8 +1549,17 @@ class PortfolioBacktester:
         total_value = self.results['final_value']
         for etf_code, position in self.positions.items():
             last_date = self.daily_dates[-1]
-            if etf_code in self.etf_data and last_date in self.etf_data[etf_code].index:
-                current_price = self.etf_data[etf_code].loc[last_date, 'close']
+            if etf_code in self.etf_data:
+                etf_data_df = self.etf_data[etf_code]
+                if last_date in etf_data_df.index:
+                    current_price = etf_data_df.loc[last_date, 'close']
+                else:
+                    prior_dates = etf_data_df.index[etf_data_df.index <= last_date]
+                    if len(prior_dates) > 0:
+                        current_price = etf_data_df.loc[prior_dates[-1], 'close']
+                    else:
+                        continue
+                
                 market_value = position['shares'] * current_price
                 percentage = market_value / total_value * 100
                 profit_loss = market_value - position['total_cost']
@@ -1766,9 +1844,15 @@ class PortfolioBacktester:
         """添加回撤子图"""
         # 创建时间序列
         dates = pd.to_datetime(self.daily_dates)
-        value_series = pd.Series(self.daily_values, index=dates)
-        rolling_max = value_series.expanding().max()
-        drawdown = (value_series - rolling_max) / rolling_max * 100
+        
+        # 优先使用基于 TWR 计算的准确回撤序列
+        if hasattr(self, 'twr_drawdown_series'):
+            drawdown = self.twr_drawdown_series.copy()
+            drawdown.index = dates
+        else:
+            value_series = pd.Series(self.daily_values, index=dates)
+            rolling_max = value_series.expanding().max()
+            drawdown = (value_series - rolling_max) / rolling_max * 100
 
         # 回撤线
         fig.add_trace(go.Scatter(
@@ -1849,6 +1933,9 @@ class PortfolioBacktester:
             x=heatmap_pivot.columns,
             y=years,
             colorscale='RdYlGn',
+            zmin=-10,
+            zmid=0,
+            zmax=10,
             text=heatmap_pivot.round(2).values,
             texttemplate='%{text}%',
             textfont=dict(size=8),
