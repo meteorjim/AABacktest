@@ -647,9 +647,15 @@ class PortfolioBacktester:
                 if len(future_dates) > 0:
                     buy_date = future_dates[0]
                 else:
-                    if not self.verbose_trading:
-                        print(f"  {etf_code}: 在 {buy_date.strftime('%Y-%m-%d')} 及之后无交易数据，定投资金跳过")
-                    continue
+                    # 如果未来没有交易日（跨市场节假日错位导致提早停更）
+                    # 退回寻找历史上最近的一个有效交易日进行结算
+                    past_dates = self.etf_data[etf_code].index[self.etf_data[etf_code].index < buy_date]
+                    if len(past_dates) > 0:
+                        buy_date = past_dates[-1]
+                    else:
+                        if not self.verbose_trading:
+                            print(f"  {etf_code}: 在 {buy_date.strftime('%Y-%m-%d')} 的前后均无交易数据，定投资金跳过")
+                        continue
 
             close_price = self.etf_data[etf_code].loc[buy_date, 'close']
 
@@ -1690,19 +1696,21 @@ class PortfolioBacktester:
 
 
     def _plot_combined_dashboard(self):
-        """生成包含5个子图的合并仪表板"""
-        # 创建5x1的子图布局，前两个图独占一排，后面三个图共享一排
+        """生成包含7个子图的合并仪表板"""
+        # 创建7x1的子图布局
         fig = make_subplots(
-            rows=5, cols=1,
-            subplot_titles=('账户资金变化', '累计收益率', '回撤分析', '月度收益率热力图', '年度收益率'),
+            rows=7, cols=1,
+            subplot_titles=('账户资金变化', '累计收益率', '回撤分析', '持仓绝对市值走势', '持仓动态权重比', '月度收益率热力图', '年度收益率'),
             specs=[
                 [{"secondary_y": False}],  # 账户资金变化
                 [{"secondary_y": False}],  # 累计收益率
                 [{"secondary_y": False}],  # 回撤分析
+                [{"secondary_y": False}],  # 持仓绝对市值走势
+                [{"secondary_y": False}],  # 持仓动态权重比
                 [{"type": "heatmap"}],    # 月度收益率热力图
                 [{"type": "bar"}]         # 年度收益率
             ],
-            vertical_spacing=0.08
+            vertical_spacing=0.04
         )
 
         # 1. 账户资金变化折线图 (第1行)
@@ -1714,11 +1722,17 @@ class PortfolioBacktester:
         # 3. 回撤图 (第3行)
         self._add_drawdown_subplot(fig, row=3, col=1)
 
-        # 4. 月度收益率热力图 (第4行)
-        self._add_monthly_heatmap_subplot(fig, row=4, col=1)
+        # 4. 单一资产市值折线图 (第4行)
+        self._add_asset_values_subplot(fig, row=4, col=1)
 
-        # 5. 年度收益率柱状图 (第5行)
-        self._add_annual_returns_subplot(fig, row=5, col=1)
+        # 5. 单一资产权重占比分布图 (第5行)
+        self._add_asset_weights_subplot(fig, row=5, col=1)
+
+        # 6. 月度收益率热力图 (第6行)
+        self._add_monthly_heatmap_subplot(fig, row=6, col=1)
+
+        # 7. 年度收益率柱状图 (第7行)
+        self._add_annual_returns_subplot(fig, row=7, col=1)
 
         # 更新整体布局
         fig.update_layout(
@@ -1729,12 +1743,26 @@ class PortfolioBacktester:
             },
             template='plotly_white',
             showlegend=True,
-            height=2400,  # 增加高度以容纳更多行
+            height=3200,  # 增加高度以容纳更多行
             width=1000,  # 增加宽度以拉长x轴
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
-                y=1.02,
+                y=1.015,
+                xanchor="right",
+                x=1
+            ),
+            legend2=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=0.565,
+                xanchor="right",
+                x=1
+            ),
+            legend3=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=0.415,
                 xanchor="right",
                 x=1
             )
@@ -2046,6 +2074,70 @@ class PortfolioBacktester:
         # 更新子图布局
         fig.update_xaxes(title_text="年份", row=row, col=col)
         fig.update_yaxes(title_text="收益率 (%)", tickformat='.1f', row=row, col=col)
+
+    def _add_asset_values_subplot(self, fig, row, col):
+        """添加单一资产绝对市值走势图"""
+        dates = self.daily_dates
+        
+        for etf_code in self.etf_codes:
+            values = [self.daily_positions[d][etf_code]['value'] if etf_code in self.daily_positions[d] else 0 for d in dates]
+            
+            fig.add_trace(go.Scatter(
+                x=dates,
+                y=values,
+                mode='lines',
+                name=f'{etf_code} 市值',
+                legend='legend2',
+                hovertemplate='<b>%{x}</b><br>' + f'{etf_code} 市值: ¥%{{y:,.0f}}<extra></extra>',
+            ), row=row, col=col)
+            
+        # 加上现金
+        cash_values = [self.daily_positions[d].get('cash', {}).get('value', 0) for d in dates]
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=cash_values,
+            mode='lines',
+            name='现金市值',
+            legend='legend2',
+            line=dict(dash='dot', color='gray'),
+            hovertemplate='<b>%{x}</b><br>现金金额: ¥%{y:,.0f}<extra></extra>',
+        ), row=row, col=col)
+        
+        fig.update_xaxes(title_text="日期", row=row, col=col)
+        fig.update_yaxes(title_text="绝对市值 (¥)", row=row, col=col)
+        
+    def _add_asset_weights_subplot(self, fig, row, col):
+        """添加单一资产动态权重面积图"""
+        dates = self.daily_dates
+        
+        for etf_code in self.etf_codes:
+            weights = [(self.daily_positions[d][etf_code]['weight'] * 100) if etf_code in self.daily_positions[d] else 0 for d in dates]
+            
+            fig.add_trace(go.Scatter(
+                x=dates,
+                y=weights,
+                mode='lines',  # Stack filled area chart
+                stackgroup='one',
+                name=f'{etf_code} 权重',
+                legend='legend3',
+                hovertemplate='<b>%{x}</b><br>' + f'{etf_code} 权重: %{{y:.1f}}%<extra></extra>',
+            ), row=row, col=col)
+            
+        # 加上现金权重
+        cash_weights = [self.daily_positions[d].get('cash', {}).get('weight', 0) * 100 for d in dates]
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=cash_weights,
+            mode='lines',
+            stackgroup='one',
+            name='现金比例',
+            legend='legend3',
+            line=dict(color='lightgray'),
+            hovertemplate='<b>%{x}</b><br>现金比例: %{y:.1f}%<extra></extra>',
+        ), row=row, col=col)
+        
+        fig.update_xaxes(title_text="日期", row=row, col=col)
+        fig.update_yaxes(title_text="权重占比 (%)", range=[0, 100], row=row, col=col)
 
     def _add_summary_stats_subplot(self, fig, row, col):
         """添加汇总统计信息子图"""

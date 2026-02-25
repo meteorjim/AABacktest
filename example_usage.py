@@ -33,7 +33,7 @@ if __name__ == "__main__":
         risk_free_rate=0.02,              # 无风险利率：用于计算夏普比率 (0.02 = 2%)
 
         # --- 定投策略 (DCA) ---
-        enable_dca = False,                # 是否开启定投：True=开启, False=关闭
+        enable_dca = True,                # 是否开启定投：True=开启, False=关闭
         dca_amount = 100000,              # 每次定投金额(元)
         dca_freq = 'yearly',              # 定投频率：'monthly'(月度), 'yearly'(年度)
 
