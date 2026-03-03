@@ -91,24 +91,24 @@ class TestDCA:
             date = trans['date']
             etf_code = trans['etf_code']
 
-            # 获取当天的收盘价（独立数据源）
+            # 获取当天的开盘价（独立数据源）
             data = etf_data[etf_code]
 
             assert date in data.index, \
                 f"日期 {date} 在独立数据中找不到"
 
-            close_price = data.loc[date, 'close']
+            open_price = data.loc[date, 'open']
 
-            # 验证使用收盘价买入
-            assert abs(trans['price'] - close_price) < 0.001, \
-                f"定投未使用收盘价: 日期 {date.strftime('%Y-%m-%d')}, 期望 {close_price:.3f}, 实际 {trans['price']:.3f}"
+            # 验证使用开盘价买入
+            assert abs(trans['price'] - open_price) < 0.001, \
+                f"定投未使用开盘价: 日期 {date.strftime('%Y-%m-%d')}, 期望 {open_price:.3f}, 实际 {trans['price']:.3f}"
 
             # 验证买入股数计算
             dca_amount = dca_monthly_config['dca_amount']
             etf_weight = weights[etf_codes.index(etf_code)]
             target_value = dca_amount * etf_weight
             # 正确的交易成本计算：目标投资额需要同时覆盖股票价值和交易成本
-            expected_shares = target_value / (close_price * (1 + backtester.transaction_cost))
+            expected_shares = target_value / (open_price * (1 + backtester.transaction_cost))
 
             assert abs(trans['shares'] - expected_shares) < 0.001, \
                 f"定投股数计算错误: 期望 {expected_shares:.4f}, 实际 {trans['shares']:.4f}"
@@ -329,7 +329,7 @@ class TestDCA:
                     f"期望 {expected_weight:.2f}, 实际 {actual_weight:.2f}"
 
     def test_dca_price_validation(self, etf_data_single):
-        """验证定投使用收盘价"""
+        """验证定投使用开盘价"""
         # 短期测试便于验证
         config = {
             'etf_codes': ['511010'],
@@ -356,7 +356,7 @@ class TestDCA:
         backtester = PortfolioBacktester(**config)
         backtester.run_backtest()
 
-        # 验证定投交易使用收盘价
+        # 验证定投交易使用开盘价
         dca_transactions = [t for t in backtester.transactions
                           if t['type'] == 'dca_buy']
 
@@ -368,17 +368,15 @@ class TestDCA:
 
             open_price = data.loc[date, 'open']
             close_price = data.loc[date, 'close']
-            high_price = data.loc[date, 'high']
-            low_price = data.loc[date, 'low']
-
-            # 验证定投使用收盘价
-            assert abs(trans['price'] - close_price) < 0.001, \
-                f"定投未使用收盘价: 日期 {date.strftime('%Y-%m-%d')}, " \
+            # 验证定投使用开盘价
+            assert abs(trans['price'] - open_price) < 0.001, \
+                f"定投未使用开盘价: 日期 {date.strftime('%Y-%m-%d')}, " \
                 f"开盘 {open_price:.3f}, 收盘 {close_price:.3f}, 买入 {trans['price']:.3f}"
 
-            # 验证不是使用其他价格
-            assert abs(trans['price'] - open_price) > 0.01, \
-                "定投不应该使用开盘价"
+            # 开收盘不一致时，买入价应更接近开盘价
+            if abs(open_price - close_price) > 1e-6:
+                assert abs(trans['price'] - open_price) < abs(trans['price'] - close_price), \
+                    "定投买入价应优先贴近开盘价"
 
     @pytest.mark.slow
     def test_dca_long_period(self):

@@ -121,17 +121,17 @@ class TestRebalancing:
         assert len(rebalance_buy_transactions) > 0, "应该有再平衡买入交易"
         assert len(rebalance_sell_transactions) > 0, "应该有再平衡卖出交易"
 
-        # 验证交易价格的合理性（应使用收盘价）
+        # 验证交易价格的合理性（应使用开盘价）
         for trans in rebalance_buy_transactions + rebalance_sell_transactions:
             date = trans['date']
             etf_code = trans['etf_code']
             price = trans['price']
 
-            # 从缓存数据中获取对应日期的收盘价
+            # 从缓存数据中获取对应日期的开盘价
             if etf_code in etf_data_dca and date in etf_data_dca[etf_code].index:
-                expected_price = etf_data_dca[etf_code].loc[date, 'close']
+                expected_price = etf_data_dca[etf_code].loc[date, 'open']
                 assert abs(price - expected_price) < 0.001, \
-                    f"再平衡应使用收盘价: {date}, {etf_code}, 期望 {expected_price:.3f}, 实际 {price:.3f}"
+                    f"再平衡应使用开盘价: {date}, {etf_code}, 期望 {expected_price:.3f}, 实际 {price:.3f}"
 
     def test_rebalancing_weight_correction(self, etf_data_dca):
         """测试再平衡的权重修正效果"""

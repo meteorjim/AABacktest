@@ -16,14 +16,14 @@ if __name__ == "__main__":
         # --- 核心资产配置 ---
         # #           国债.     红利(模拟3%分红).  黄金.     纳斯达克.
         etf_codes=['000012', '000015@0.03', 'XAUUSD:CUR', 'QQQ'],   # ETF代码列表：输入你要回测的ETF/股票代码
-        weights=  [3,       4,      1,      1],         # 目标权重：对应上述代码的配置比例(会自动归一化)
+        # weights=  [3,       4,      1,      1],         # 目标权重：对应上述代码的配置比例(会自动归一化)
         # etf_codes=['511010', '510880', '518880', '513100'],   # ETF代码列表：输入你要回测的ETF/股票代码
-        # weights=  [4,       3,      3,      3],         # 目标权重：对应上述代码的配置比例(会自动归一化)
+        weights=  [3,       3,      3,      3],         # 目标权重：对应上述代码的配置比例(会自动归一化)
  
         # --- 再平衡策略 ---
         enable_rebalancing=True,          # 是否启用自动再平衡：True=开启, False=关闭
         rebalance_freq='yearly',          # 再平衡频率：'monthly'(月度), 'quarterly'(季度), 'yearly'(年度)
-        # rebalance_threshold=0.01,         # 阈值再平衡：当任一资产权重偏离目标超过此值(如0.01=1%)时，强制触发再平衡
+        # rebalance_threshold=0.03,         # 阈值再平衡：当任一资产权重偏离目标超过此值(如0.01=1%)时，强制触发再平衡
 
         # --- 回测时间与资金 ---
         start_date='2005-01-01',          # 回测开始日期 'YYYY-MM-DD'
@@ -49,4 +49,4 @@ if __name__ == "__main__":
     backtester.run_backtest()
 
     # 生成完整报告
-    backtester.generate_report(show_plot=False)
+    backtester.generate_report(show_plot=True)

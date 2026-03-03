@@ -144,7 +144,7 @@ class TestBasicBacktest:
                 f"{etf_code} 持仓股数错误: 期望 {expected_shares:.4f}, 实际 {position['shares']:.4f}"
 
         # 验证总成本合理
-        assert total_expected_cost <= initial_capital, \
+        assert total_expected_cost <= initial_capital + 1e-6, \
             f"总成本超过初始资金: {total_expected_cost:.2f} > {initial_capital:.2f}"
 
     def test_multiple_etf_portfolio_weights(self, multiple_etf_config, etf_data_multiple):
