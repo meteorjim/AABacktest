@@ -398,7 +398,8 @@ class PortfolioBacktester:
         if not self.pending_orders:
             return
 
-        executable = []
+        executable_sells = []
+        executable_buys = []
         still_pending = []
         for order in self.pending_orders:
             etf_code = order['etf_code']
@@ -411,15 +412,64 @@ class PortfolioBacktester:
                 continue
 
             if date in self.etf_data[etf_code].index:
-                executable.append(order)
+                if order['side'] == 'sell':
+                    executable_sells.append(order)
+                else:
+                    executable_buys.append(order)
             else:
                 still_pending.append(order)
 
-        # 先卖后买，避免现金约束导致不必要的买单失败
-        executable.sort(key=lambda x: 0 if x['side'] == 'sell' else 1)
         self.pending_orders = still_pending
 
-        for order in executable:
+        def _execute_buy_amount(order, open_price, allocated_amount):
+            """按指定金额执行买入，allocated_amount 为含手续费的总成本预算。"""
+            if allocated_amount <= 0:
+                return 0.0
+
+            affordable_amount = min(allocated_amount, self.cash)
+            if affordable_amount <= 0:
+                return 0.0
+
+            shares = affordable_amount / (open_price * (1 + self.transaction_cost))
+            cost = shares * open_price * (1 + self.transaction_cost)
+
+            if shares <= 0 or cost <= 0:
+                return 0.0
+
+            etf_code = order['etf_code']
+            if etf_code in self.positions:
+                old_shares = self.positions[etf_code]['shares']
+                old_cost = self.positions[etf_code]['total_cost']
+                new_shares = old_shares + shares
+                new_total_cost = old_cost + cost
+                avg_cost = new_total_cost / new_shares
+                self.positions[etf_code] = {
+                    'shares': new_shares,
+                    'avg_cost': avg_cost,
+                    'total_cost': new_total_cost
+                }
+            else:
+                self.positions[etf_code] = {
+                    'shares': shares,
+                    'avg_cost': open_price,
+                    'total_cost': cost
+                }
+
+            self.cash -= cost
+            self.transactions.append({
+                'date': date,
+                'signal_date': order['source_date'],
+                'type': order['tx_type'],
+                'etf_code': etf_code,
+                'shares': shares,
+                'price': open_price,
+                'amount': cost,
+                'cash_after': self.cash
+            })
+            return cost
+
+        # 第一阶段：先执行卖单
+        for order in executable_sells:
             etf_code = order['etf_code']
             open_price = self.etf_data[etf_code].loc[date, 'open']
             if pd.isna(open_price) or open_price <= 0:
@@ -427,89 +477,80 @@ class PortfolioBacktester:
                 self.pending_orders.append(order)
                 continue
 
-            if order['side'] == 'sell':
-                if etf_code not in self.positions:
-                    continue
+            if etf_code not in self.positions:
+                continue
 
-                current_shares = self.positions[etf_code]['shares']
-                shares_to_sell = min(order['shares'], current_shares)
-                if shares_to_sell <= 0:
-                    continue
+            current_shares = self.positions[etf_code]['shares']
+            shares_to_sell = min(order['shares'], current_shares)
+            if shares_to_sell <= 0:
+                continue
 
-                proceeds = shares_to_sell * open_price * (1 - self.transaction_cost)
-                remaining_shares = current_shares - shares_to_sell
+            proceeds = shares_to_sell * open_price * (1 - self.transaction_cost)
+            remaining_shares = current_shares - shares_to_sell
 
-                if remaining_shares > 0:
-                    remaining_cost_ratio = remaining_shares / current_shares
-                    new_total_cost = self.positions[etf_code]['total_cost'] * remaining_cost_ratio
-                    avg_cost = new_total_cost / remaining_shares
-                    self.positions[etf_code] = {
-                        'shares': remaining_shares,
-                        'avg_cost': avg_cost,
-                        'total_cost': new_total_cost
-                    }
-                else:
-                    del self.positions[etf_code]
-
-                self.cash += proceeds
-                self.transactions.append({
-                    'date': date,
-                    'signal_date': order['source_date'],
-                    'type': order['tx_type'],
-                    'etf_code': etf_code,
-                    'shares': shares_to_sell,
-                    'price': open_price,
-                    'amount': proceeds,
-                    'cash_after': self.cash
-                })
+            if remaining_shares > 0:
+                remaining_cost_ratio = remaining_shares / current_shares
+                new_total_cost = self.positions[etf_code]['total_cost'] * remaining_cost_ratio
+                avg_cost = new_total_cost / remaining_shares
+                self.positions[etf_code] = {
+                    'shares': remaining_shares,
+                    'avg_cost': avg_cost,
+                    'total_cost': new_total_cost
+                }
             else:
-                # 买单金额是“目标总成本”（包含手续费）
-                affordable_amount = min(order['amount'], self.cash)
-                if affordable_amount <= 0:
-                    # 现金不足，保留挂单
-                    self.pending_orders.append(order)
-                    continue
+                del self.positions[etf_code]
 
-                shares = affordable_amount / (open_price * (1 + self.transaction_cost))
-                cost = shares * open_price * (1 + self.transaction_cost)
+            self.cash += proceeds
+            self.transactions.append({
+                'date': date,
+                'signal_date': order['source_date'],
+                'type': order['tx_type'],
+                'etf_code': etf_code,
+                'shares': shares_to_sell,
+                'price': open_price,
+                'amount': proceeds,
+                'cash_after': self.cash
+            })
 
-                if shares <= 0 or cost <= 0:
-                    continue
+        # 第二阶段：买单
+        rebalance_buys = [o for o in executable_buys if o['tx_type'] == 'rebalance_buy']
+        normal_buys = [o for o in executable_buys if o['tx_type'] != 'rebalance_buy']
 
-                if etf_code in self.positions:
-                    old_shares = self.positions[etf_code]['shares']
-                    old_cost = self.positions[etf_code]['total_cost']
-                    new_shares = old_shares + shares
-                    new_total_cost = old_cost + cost
-                    avg_cost = new_total_cost / new_shares
-                    self.positions[etf_code] = {
-                        'shares': new_shares,
-                        'avg_cost': avg_cost,
-                        'total_cost': new_total_cost
-                    }
-                else:
-                    self.positions[etf_code] = {
-                        'shares': shares,
-                        'avg_cost': open_price,
-                        'total_cost': cost
-                    }
+        # 2.1 非再平衡买单：保留原有顺延语义
+        for order in normal_buys:
+            etf_code = order['etf_code']
+            open_price = self.etf_data[etf_code].loc[date, 'open']
+            if pd.isna(open_price) or open_price <= 0:
+                self.pending_orders.append(order)
+                continue
 
-                self.cash -= cost
-                self.transactions.append({
-                    'date': date,
-                    'signal_date': order['source_date'],
-                    'type': order['tx_type'],
-                    'etf_code': etf_code,
-                    'shares': shares,
-                    'price': open_price,
-                    'amount': cost,
-                    'cash_after': self.cash
-                })
+            cost = _execute_buy_amount(order, open_price, order['amount'])
+            remaining_amount = order['amount'] - cost
+            if remaining_amount > 1e-8:
+                order['amount'] = remaining_amount
+                self.pending_orders.append(order)
 
-                remaining_amount = order['amount'] - cost
-                if remaining_amount > 1e-8:
-                    order['amount'] = remaining_amount
-                    self.pending_orders.append(order)
+        # 2.2 再平衡买单：支持“当日按资金比例部分成交”，剩余不跨期
+        valid_rebalance_buys = []
+        total_rebalance_amount = 0.0
+        for order in rebalance_buys:
+            etf_code = order['etf_code']
+            open_price = self.etf_data[etf_code].loc[date, 'open']
+            if pd.isna(open_price) or open_price <= 0:
+                # 当天不开盘/价格异常则继续顺延到下一个开盘日
+                self.pending_orders.append(order)
+                continue
+            valid_rebalance_buys.append((order, open_price))
+            total_rebalance_amount += order['amount']
+
+        if valid_rebalance_buys and self.cash > 0 and total_rebalance_amount > 0:
+            fill_ratio = min(1.0, self.cash / total_rebalance_amount)
+            for idx, (order, open_price) in enumerate(valid_rebalance_buys):
+                target_amount = order['amount'] * fill_ratio
+                # 最后一单吃掉剩余可用现金，减少尾差
+                if idx == len(valid_rebalance_buys) - 1:
+                    target_amount = min(order['amount'], self.cash)
+                _execute_buy_amount(order, open_price, target_amount)
 
     def fetch_data(self) -> Dict[str, pd.DataFrame]:
         """获取所有ETF的价格数据"""
@@ -1323,6 +1364,7 @@ class PortfolioBacktester:
 
         # --- 修正收益率计算逻辑 (TWR) ---
         # 1. 计算每日调整后收益率 (剔除现金流影响)
+        # 现金流在当日开盘前注入并参与当日交易，因此分母应为 prev_value + flow
         adjusted_returns = []
         
         # 第一天的收益率：(第一天价值 - 第一天现金流) / 初始资金 - 1
@@ -1339,9 +1381,10 @@ class PortfolioBacktester:
             prev_value = self.daily_values[i-1]
             flow = self.daily_flows.get(date, 0)
             
-            # 修正后的收益率公式: (Vt - Ct) / Vt-1 - 1
-            if prev_value > 0:
-                r_t = (current_value - flow) / prev_value - 1
+            # 修正后的收益率公式: Vt / (Vt-1 + Ct) - 1
+            base_value = prev_value + flow
+            if base_value > 0:
+                r_t = current_value / base_value - 1
             else:
                 r_t = 0
             adjusted_returns.append(r_t)

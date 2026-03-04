@@ -51,9 +51,9 @@ The heart of the simulation.
     -   **Rebalance Check**:
         -   Is it a `time_rebalance_date`? -> Yes, Rebalance.
         -   Is `rebalance_threshold` > 0 AND `_check_rebalance_threshold(date)` is True? -> Yes, Rebalance (Dynamic).
-        -   *Action*: `_rebalance_portfolio(date)` targets original `self.weights`. Both valuation target mapping and actual execution are rigorously pinned to `close` prices. To prevent cash stranding during cross-market holiday misalignments (e.g. A-shares closed but US-shares open), the system implements a **Past-Date Fallback Engine**. If a future price does not exist, it falls back to the most recent historical `close` price, ensuring 100% capital deployment (0% cash drag).
+        -   *Action*: `_rebalance_portfolio(date)` targets `self.effective_weights` (which filters out missing assets). Valuation target mapping is rigorously pinned to `close` prices (using a **Past-Date Fallback Engine** if today's data is missing). Actual execution is converted into **Pending Orders**, which are rigorously pinned to the `open` price of the next available trading day. This decoupling ensures accurate target calculation while respecting realistic execution constraints.
     -   **DCA Check**:
-        -   Is it a `dca_date`? -> Yes, `_dca_buy(date)`. Uses the same `close` price synchronization and fallback logic.
+        -   Is it a `dca_date`? -> Yes, `_dca_buy(date)`. Uses the same target setting and pending order mechanism pinned to `open` prices.
     -   **Position Update**:
         -   Updates daily market value based on `close` prices.
         -   Records state to `self.daily_positions` and `self.daily_values`.

@@ -120,18 +120,18 @@ def fetch_seeking_alpha_to_csv(
 
 # ==================== Cookies 配置 ====================
 # 建议把 cookies 保存到单独的文件或环境变量中
-COOKIES = [
-
-]
+COOKIES = []
 
 
 # ==================== 使用示例 ====================
 if __name__ == "__main__":
+    nowaday = datetime.now().strftime("%Y-%m-%d")
     # 获取数据并保存为 CSV
     df = fetch_seeking_alpha_to_csv(
+        # ticker="XAUUSD:CUR",
         ticker="QQQ",
         start_date="2005-01-01",
-        end_date="2026-02-24",
+        end_date=nowaday,
         output=True,
         cookies_list=COOKIES
     )
