@@ -103,7 +103,7 @@ def fetch_seeking_alpha_to_csv(
     
     # 调整列顺序
     df = df[["date", "open", "high", "low", "close", "Change %", "volume", "cr"]]
-    
+    start_date = df["date"].iloc[0]
     # 设置 date 为索引
     df = df.set_index("date")
     df = df[::-1]
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     # 获取数据并保存为 CSV
     df = fetch_seeking_alpha_to_csv(
         # ticker="XAUUSD:CUR",
-        ticker="QQQ",
+        ticker="USO",
         start_date="2005-01-01",
         end_date=nowaday,
         output=True,
